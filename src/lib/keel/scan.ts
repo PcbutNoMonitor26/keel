@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import pg from "pg";
-import { SOL_MIN_USD, scoreOf, DEFAULT_CONFIG, type Quote, type Regime, type Scan } from "@/lib/keel/engine";
+import { SOL_MIN_USD, scoreOf, tapeFromCloses, DEFAULT_CONFIG, type Quote, type Regime, type Scan } from "@/lib/keel/engine";
 import { cohortFromTape, settleTape, type TapePrint } from "@/lib/keel/trader-intel";
 
 const UA = "Keel/1.0";
@@ -39,6 +39,8 @@ type Held = { address: string };
 
 let pumpSocket: WebSocket | null = null;
 let pumpRetryAt = 0;
+let pumpFails = 0;
+let lastPumpMsgAt = 0;
 let lastPrintAt = 0;
 let pumpStatus = "Pump.fun launch feed is starting.";
 let lastSolUsd = 0;
@@ -52,25 +54,37 @@ const feedPool = process.env.DATABASE_URL?.trim()
   : null;
 
 async function getJson<T>(url: string, ms = 2500): Promise<T> {
-  const res = await fetch(url, { headers: { accept: "application/json", "user-agent": UA }, signal: AbortSignal.timeout(ms) });
-  if (!res.ok) throw new Error(`Provider returned ${res.status}`);
-  return (await res.json()) as T;
+  let last: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, { headers: { accept: "application/json", "user-agent": UA }, signal: AbortSignal.timeout(ms) });
+      if (res.status === 429 || res.status >= 500) throw new Error(`Provider returned ${res.status}`);
+      if (!res.ok) throw new Error(`Provider returned ${res.status}`);
+      return (await res.json()) as T;
+    } catch (error) {
+      last = error;
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  throw last instanceof Error ? last : new Error("Provider request failed");
 }
 function n(v: unknown): number { const x = Number(v); return Number.isFinite(x) ? x : 0; }
-function pct(now: number, prev: number): number { return prev > 0 ? ((now - prev) / prev) * 100 : 0; }
-function stdev(xs: number[]): number {
-  if (xs.length < 2) return 0;
-  const mean = xs.reduce((s, x) => s + x, 0) / xs.length;
-  return Math.sqrt(xs.reduce((s, x) => s + (x - mean) ** 2, 0) / (xs.length - 1));
-}
 let solCache: { at: number; tape: Awaited<ReturnType<typeof loadSolTape>> } | null = null;
 async function loadSolTape() {
-  const candles = await getJson<number[][]>("https://api.exchange.coinbase.com/products/SOL-USD/candles?granularity=60", 2000);
-  const closes = candles.slice(0, 16).map((c) => n(c[4])).filter((x) => x > 0);
-  const sol = closes[0] ?? 0, ret1 = pct(sol, closes[1] ?? sol), ret5 = pct(sol, closes[5] ?? sol);
-  const sol15 = pct(sol, closes[15] ?? sol);
-  const vol1m = stdev(closes.slice(0, -1).map((x, i) => pct(x, closes[i + 1] ?? x)));
-  return { regime: (ret5 >= 0.8 ? "up" : ret5 <= -1.2 || ret1 <= -0.6 ? "down" : "chop") as Regime, sol, ret1, ret5, sol15, vol1m, note: "" };
+  let closes: number[] = [];
+  try {
+    const candles = await getJson<number[][]>("https://api.exchange.coinbase.com/products/SOL-USD/candles?granularity=60", 2000);
+    closes = candles.slice(0, 16).map((c) => n(c[4]));
+  } catch {
+    closes = [];
+  }
+  if (closes.filter((x) => x > 0).length < 6) {
+    const rows = await getJson<unknown[]>("https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=1m&limit=16", 2000);
+    closes = rows.slice(-16).reverse().map((row) => n(Array.isArray(row) ? row[4] : 0));
+  }
+  const tape = tapeFromCloses(closes);
+  if (!tape) throw new Error("SOL tape failed the sanity check");
+  return { ...tape, note: "" };
 }
 async function solTape() {
   const now = Date.now();
@@ -116,7 +130,10 @@ function tapeRead(prints: { t: number; px: number }[] | undefined, now: number):
 function curvePx(event: PumpEvent, solUsd: number): number {
   const vSol = n(event.vSolInBondingCurve);
   const vTokens = n(event.vTokensInBondingCurve);
-  if (solUsd > 0 && vSol > 0 && vTokens > 0) return (vSol / vTokens) * solUsd;
+  if (solUsd > 0 && vSol > 0 && vTokens > 0) {
+    const px = (vSol / vTokens) * solUsd;
+    return px > 0 && px < 1_000_000 ? px : 0;
+  }
   return 0;
 }
 function realCurveUsd(event: PumpEvent, solUsd: number): number {
@@ -197,7 +214,13 @@ function ensurePumpStream(now: number) {
     pumpStatus = "Pump.fun stream unavailable in this server runtime; waiting for a WebSocket-capable Node runtime.";
     return;
   }
-  if (pumpSocket?.readyState === WebSocket.OPEN) return;
+  if (pumpSocket?.readyState === WebSocket.OPEN) {
+    if (lastPumpMsgAt > 0 && now - lastPumpMsgAt > 45_000) {
+      try { pumpSocket.close(); } catch { /* already closing */ }
+      pumpSocket = null;
+      pumpStatus = "Pump.fun stream went quiet. Reconnecting.";
+    } else return;
+  }
   if (pumpSocket && pumpSocket.readyState !== WebSocket.CLOSED) {
     try { pumpSocket.close(); } catch { /* already closing */ }
     pumpSocket = null;
@@ -208,12 +231,15 @@ function ensurePumpStream(now: number) {
     pumpSocket = socket;
     socket.addEventListener("open", () => {
       if (pumpSocket !== socket) return;
+      pumpFails = 0;
+      lastPumpMsgAt = Date.now();
       socket.send(JSON.stringify({ method: "subscribeNewToken" }));
       socket.send(JSON.stringify({ method: "subscribeMigration" }));
       for (const mint of pumpLaunches.keys()) watchMint(socket, mint);
       pumpStatus = "Pump.fun launch, trade, and migration stream connected.";
     });
     socket.addEventListener("message", (message) => {
+      lastPumpMsgAt = Date.now();
       try {
         const raw = typeof message.data === "string" ? message.data : "";
         if (!raw || raw.length > 64_000) return;
@@ -259,7 +285,8 @@ function ensurePumpStream(now: number) {
     socket.addEventListener("close", () => {
       if (pumpSocket !== socket) return;
       pumpSocket = null;
-      pumpRetryAt = Date.now() + 2_000;
+      pumpFails += 1;
+      pumpRetryAt = Date.now() + Math.min(30_000, 1_500 * 2 ** Math.min(pumpFails, 4));
       pumpStatus = "Pump.fun stream disconnected. Reconnecting.";
     });
     socket.addEventListener("error", () => {
@@ -276,9 +303,11 @@ function ensurePumpStream(now: number) {
 }
 function pairQuote(address: string, p: Pair, extra: Partial<Quote> = {}): Quote | null {
   const price = n(p.priceUsd);
-  if (p.chainId !== "solana" || p.baseToken?.address !== address || price <= 0) return null;
+  const liq = n(p.liquidity?.usd);
+  if (p.chainId !== "solana" || p.baseToken?.address !== address || !(price > 0) || price > 1_000_000) return null;
+  if (liq < 0 || liq > 1e12) return null;
   return { venue: "sol", address, symbol: p.baseToken?.symbol || "?", title: p.baseToken?.name || "", price,
-    liq: n(p.liquidity?.usd), vol1h: n(p.volume?.h1), change1h: n(p.priceChange?.h1), change5m: n(p.priceChange?.m5),
+    liq, vol1h: n(p.volume?.h1), change1h: n(p.priceChange?.h1), change5m: n(p.priceChange?.m5),
     buys: n(p.txns?.m5?.buys), sells: n(p.txns?.m5?.sells),
     dex: p.dexId || "dex", side: "long", assetId: "", mins: SOL_MIN_USD, minutes: 0, edge: 0, fair: 0, endsAt: 0, ...extra };
 }

@@ -104,15 +104,24 @@ function fit(samples: Sample[]): Weights | null {
   return { mean, std, w, b, trainN: train.length, holdoutN: hold.length, holdoutAvg: holdAvg };
 }
 
+function drifted(samples: Sample[]): boolean {
+  const tail = samples.slice(-12);
+  if (tail.length < 12) return false;
+  return tail.reduce((sum, sample) => sum + sample.pnl, 0) / tail.length <= 0;
+}
+
 export function noteSample(memory: ModelMemory | undefined, x: number[], pnl: number, at: number): ModelMemory {
   const prev = memory?.samples ? memory : emptyModel();
   const samples = [...prev.samples, { x: x.slice(0, DIM), pnl, at }].slice(-400);
-  return { samples, weights: fit(samples) };
+  return { samples, weights: drifted(samples) ? null : fit(samples) };
 }
 
 export function modelLine(memory: ModelMemory | undefined): string {
   const samples = memory?.samples?.length ?? 0;
   const weights = memory?.weights;
+  if (!weights && samples >= MIN_SAMPLES) {
+    return "Model off. The latest closes are not green, so the rules are back in charge.";
+  }
   if (!weights) {
     return `Model: rules only. ${samples} of ${MIN_SAMPLES} closed scalps. Weights stay off until a later window is still green after fees.`;
   }

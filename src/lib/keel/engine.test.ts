@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip } from "./engine.ts";
+import { DEFAULT_CONFIG, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
@@ -239,4 +239,13 @@ test("a red clip is sold once it has had four seconds and the host stays on", ()
   assert.equal(next.positions.length, 0);
   assert.equal(next.running, true);
   assert.equal(next.halted, false);
+});
+
+test("a nonsense SOL print is refused and a real dip is a down day", () => {
+  assert.equal(tapeFromCloses([0, 0, 0]), null);
+  assert.equal(tapeFromCloses([1_000_000, 90, 90, 90, 90, 90]), null);
+  const soft = tapeFromCloses([89, 89.2, 89.2, 89.2, 89.2, 89.4]);
+  assert.equal(soft?.regime, "chop");
+  const down = tapeFromCloses([88, 89, 89, 89, 89, 90]);
+  assert.equal(down?.regime, "down");
 });

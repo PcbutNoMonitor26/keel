@@ -30,6 +30,18 @@ test("a later window of losses drops the weights", () => {
   assert.equal(memory.weights, null);
 });
 
+test("a green fit is dropped once the latest closes turn red", () => {
+  let memory = emptyModel();
+  for (let i = 0; i < 100; i++) {
+    const good = i % 2 === 0;
+    const x = good ? [2, 0.6, 1.5, 2, 0.4, 0.3, 0.4] : [0.2, -0.4, 0.1, 0.3, -0.8, -0.5, 2];
+    memory = noteSample(memory, x, good ? 4 : -3, i);
+  }
+  assert.ok(memory.weights);
+  for (let i = 100; i < 112; i++) memory = noteSample(memory, [2, 0.6, 1.5, 2, 0.4, 0.3, 0.4], -4, i);
+  assert.equal(memory.weights, null);
+});
+
 test("readings stay in a fixed band", () => {
   const x = readingsOf({ buys: 20, sells: 8, uniqueTraders: 9, liq: 20_000, change5m: 6, ageMin: 2 }, 0.4, 5);
   assert.equal(x.length, 7);

@@ -220,6 +220,21 @@ export function redeployClip(base: number, profit: number, eq: number): number {
   return Math.min(Math.max(base, grown), ceiling);
 }
 
+export function tapeFromCloses(closes: number[]): { regime: Regime; sol: number; ret1: number; ret5: number; sol15: number; vol1m: number } | null {
+  const xs = closes.map((v) => Number(v)).filter((x) => Number.isFinite(x) && x > 0).slice(0, 16);
+  const sol = xs[0] ?? 0;
+  if (xs.length < 6 || !(sol > 5 && sol < 10_000)) return null;
+  const pct = (now: number, prev: number) => (prev > 0 ? ((now - prev) / prev) * 100 : 0);
+  const ret1 = pct(sol, xs[1] ?? sol);
+  const ret5 = pct(sol, xs[5] ?? sol);
+  const sol15 = pct(sol, xs[Math.min(15, xs.length - 1)] ?? sol);
+  const rets = xs.slice(0, -1).map((x, i) => pct(x, xs[i + 1] ?? x));
+  const mean = rets.reduce((s, x) => s + x, 0) / Math.max(1, rets.length);
+  const vol1m = rets.length < 2 ? 0 : Math.sqrt(rets.reduce((s, x) => s + (x - mean) ** 2, 0) / (rets.length - 1));
+  const regime: Regime = ret5 >= 0.8 ? "up" : ret5 <= -1.2 || ret1 <= -0.6 ? "down" : "chop";
+  return { regime, sol, ret1, ret5, sol15, vol1m };
+}
+
 export function marketBump(regime: Regime): number {
   if (regime === "down") return 8;
   if (regime === "chop") return 4;
@@ -251,6 +266,8 @@ export function scoreOf(
   regime: Regime,
   learn?: LearnState,
 ): { score: number; reasons: string[] } {
+  if (!(q.price > 0) || !Number.isFinite(q.price) || q.price > 1_000_000) return { score: 0, reasons: ["bad quote"] };
+  if (!Number.isFinite(q.liq) || q.liq < 0 || q.liq > 1e12) return { score: 0, reasons: ["bad quote"] };
   if (q.mayhem) {
     const age = q.ageMin ?? q.minutes;
     const move = liveMove(q);
