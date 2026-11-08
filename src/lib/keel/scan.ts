@@ -54,21 +54,14 @@ const feedPool = process.env.DATABASE_URL?.trim()
   : null;
 
 async function getJson<T>(url: string, ms = 2500): Promise<T> {
-  let last: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const res = await fetch(url, { headers: { accept: "application/json", "user-agent": UA }, signal: AbortSignal.timeout(ms) });
-      if (res.status === 429 || res.status >= 500) throw new Error(`Provider returned ${res.status}`);
-      if (!res.ok) throw new Error(`Provider returned ${res.status}`);
-      return (await res.json()) as T;
-    } catch (error) {
-      last = error;
-      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-  }
-  throw last instanceof Error ? last : new Error("Provider request failed");
+  const res = await fetch(url, { headers: { accept: "application/json", "user-agent": UA }, signal: AbortSignal.timeout(ms) });
+  if (!res.ok) throw new Error(`Provider returned ${res.status}`);
+  return (await res.json()) as T;
 }
 function n(v: unknown): number { const x = Number(v); return Number.isFinite(x) ? x : 0; }
+let dexAt = 0;
+let dexPairsCache: Pair[] = [];
+let geckoCache: { at: number; value: { quotes: Quote[]; note: string } } | null = null;
 let solCache: { at: number; tape: Awaited<ReturnType<typeof loadSolTape>> } | null = null;
 async function loadSolTape() {
   let closes: number[] = [];
@@ -376,11 +369,13 @@ async function pumpFunQuotes(now: number, solUsd: number): Promise<{ quotes: Quo
     .slice(0, 20)
     .map(([mint]) => mint);
   const addresses = launches.map(([mint]) => mint);
-  let pairs: Pair[] = [];
-  if (dexMints.length) {
+  let pairs: Pair[] = dexPairsCache;
+  if (dexMints.length && now - dexAt >= 8_000) {
     try {
-      const body = await getJson<{ pairs?: Pair[] }>(`https://api.dexscreener.com/latest/dex/tokens/${dexMints.join(",")}`, 700);
-      pairs = body.pairs ?? [];
+      const body = await getJson<{ pairs?: Pair[] }>(`https://api.dexscreener.com/latest/dex/tokens/${dexMints.join(",")}`, 600);
+      dexPairsCache = body.pairs ?? [];
+      dexAt = now;
+      pairs = dexPairsCache;
     } catch {
       // Curve prices stay available when the market quote is slow.
     }
@@ -453,7 +448,7 @@ async function heldQuotes(held: Held[], known: Set<string>): Promise<Quote[]> {
 export const getScan = createServerFn({ method: "GET" }).validator(readHeld).handler(async ({ data: held }): Promise<Scan> => {
   const now = Date.now();
   if (cache && now - cache.at < CACHE_MS && held.length === 0 && lastPrintAt <= cache.at) return cache.scan;
-  if (held.length === 0 && inflight && now - inflightAt < 1_500) return inflight;
+  if (held.length === 0 && inflight) return cache?.scan ?? inflight;
   const run = buildScan(held).finally(() => {
     if (held.length === 0 && inflight === run) inflight = null;
   });
@@ -461,10 +456,18 @@ export const getScan = createServerFn({ method: "GET" }).validator(readHeld).han
     inflight = run;
     inflightAt = now;
   }
-  return run;
+  if (!cache) return run;
+  const heldCache = cache.scan;
+  return Promise.race([
+    run,
+    new Promise<Scan>((resolve) => {
+      setTimeout(() => resolve({ ...heldCache, at: Date.now() }), 1_200);
+    }),
+  ]);
 });
 
 async function geckoLiveQuotes(now: number): Promise<{ quotes: Quote[]; note: string }> {
+  if (geckoCache && now - geckoCache.at < 12_000) return geckoCache.value;
   try {
     const body = await getJson<{ data?: { attributes?: Record<string, unknown>; relationships?: { base_token?: { data?: { id?: string } }; dex?: { data?: { id?: string } } } }[] }>(
       "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1",
@@ -498,9 +501,11 @@ async function geckoLiveQuotes(now: number): Promise<{ quotes: Quote[]; note: st
         ageMin, uniqueTraders: n(tx.m5?.buyers) || stream?.uniqueTraders || undefined,
       });
     }
-    return { quotes: quotes.filter((q) => q.price > 0).slice(0, 20), note: `GeckoTerminal: ${quotes.length} new Solana pools.` };
+    const value = { quotes: quotes.filter((q) => q.price > 0).slice(0, 20), note: `GeckoTerminal: ${quotes.length} new Solana pools.` };
+    geckoCache = { at: now, value };
+    return value;
   } catch {
-    return { quotes: [], note: "GeckoTerminal new-pool feed is quiet. Launch stream still running." };
+    return geckoCache?.value ?? { quotes: [], note: "GeckoTerminal new-pool feed is quiet. Launch stream still running." };
   }
 }
 
