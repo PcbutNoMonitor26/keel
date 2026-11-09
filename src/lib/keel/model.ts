@@ -88,6 +88,7 @@ function fit(samples: Sample[]): Weights | null {
   const w = Array(DIM).fill(0);
   let b = 0;
   const lr = 0.15;
+  const l2 = 0.01;
   for (let epoch = 0; epoch < 80; epoch++) {
     for (const sample of train) {
       const z = scale(sample.x);
@@ -95,13 +96,22 @@ function fit(samples: Sample[]): Weights | null {
       for (let i = 0; i < DIM; i++) dot += w[i] * z[i];
       const p = dot > 20 ? 1 : dot < -20 ? 0 : 1 / (1 + Math.exp(-dot));
       const err = p - (sample.pnl > 0 ? 1 : 0);
-      for (let i = 0; i < DIM; i++) w[i] -= lr * err * z[i];
+      for (let i = 0; i < DIM; i++) w[i] -= lr * (err * z[i] + l2 * w[i]);
       b -= lr * err;
     }
   }
-  const holdAvg = hold.reduce((sum, sample) => sum + sample.pnl, 0) / hold.length;
-  if (!(holdAvg > 0)) return null;
-  return { mean, std, w, b, trainN: train.length, holdoutN: hold.length, holdoutAvg: holdAvg };
+  // Validate the later chronological examples the model actually selects.
+  const candidate: Weights = { mean, std, w, b, trainN: train.length, holdoutN: 0, holdoutAvg: 0 };
+  const selected = hold.filter((sample) => predict(candidate, sample.x) >= TAKE_AT);
+  if (selected.length < Math.max(12, Math.ceil(hold.length * 0.35))) return null;
+  const pnl = selected.map((sample) => sample.pnl);
+  const grossWin = pnl.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
+  const grossLoss = pnl.filter((value) => value < 0).reduce((sum, value) => sum - value, 0);
+  const holdAvg = pnl.reduce((sum, value) => sum + value, 0) / pnl.length;
+  const winRate = pnl.filter((value) => value > 0).length / pnl.length;
+  const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Number.POSITIVE_INFINITY : 0;
+  if (!(holdAvg > 0) || profitFactor < 1.2 || winRate < 0.55) return null;
+  return { ...candidate, holdoutN: selected.length, holdoutAvg: holdAvg };
 }
 
 function drifted(samples: Sample[]): boolean {

@@ -17,11 +17,9 @@ import {
   fmtUsd,
   planClip,
   pnlPct,
-  riskFor,
   scoreOf,
   stopsFor,
   paperExit,
-  RESERVE,
   DEFAULT_CONFIG,
   type Book,
   type Config,
@@ -58,8 +56,9 @@ export function Desk({ initial }: { initial: Scan }) {
       busy = true;
       const held = useDesk.getState().positions.map((p) => ({ address: p.address }));
       const scan = refresh({ data: { held } });
+      let timeoutId: number | undefined;
       const timeout = new Promise<never>((_, reject) => {
-        window.setTimeout(() => reject(new Error("slow")), 8_000);
+        timeoutId = window.setTimeout(() => reject(new Error("slow")), 8_000);
       });
       Promise.race([scan, timeout])
         .then((result) => {
@@ -69,6 +68,7 @@ export function Desk({ initial }: { initial: Scan }) {
           if (!stop) useDesk.getState().note("Scan is slow. Marks unchanged, retrying.");
         })
         .finally(() => {
+          if (timeoutId !== undefined) window.clearTimeout(timeoutId);
           busy = false;
         });
     };
@@ -80,17 +80,18 @@ export function Desk({ initial }: { initial: Scan }) {
     };
   }, [refresh, ingest, pollSec, hydrated, initial]);
 
-  const tokens = book.tokens.length > 0 ? book.tokens : initial.quotes;
-  const regime = book.tokens.length > 0 ? book.regime : initial.regime;
+  const hasScan = book.now > 0;
+  const tokens = hasScan ? book.tokens : initial.quotes;
+  const regime = hasScan ? book.regime : initial.regime;
   const shown = tokens.filter((tok) => scoreOf(tok, book.config, regime, book.learn ?? emptyLearn()).score > 0);
-  const sol = book.sol || initial.sol;
-  const ret1 = book.tokens.length > 0 ? book.ret1 : initial.ret1;
-  const ret5 = book.tokens.length > 0 ? book.ret5 : initial.ret5;
-  const sol15 = book.tokens.length > 0 ? book.sol15 : initial.sol15;
+  const sol = hasScan ? book.sol : initial.sol;
+  const ret1 = hasScan ? book.ret1 : initial.ret1;
+  const ret5 = hasScan ? book.ret5 : initial.ret5;
+  const sol15 = hasScan ? book.sol15 : initial.sol15;
   const eq = equityOf(book);
-  const session = eq - book.config.startingUsd;
+  const session = eq;
   const size = stopsFor(eq, book.config);
-  const process = (book.process ?? []).length > 0 ? book.process : (initial.process ?? []);
+  const process = hasScan ? (book.process ?? []) : (initial.process ?? []);
   const [tick, setTick] = useState(0);
   const [pick, setPick] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -336,13 +337,10 @@ export function Desk({ initial }: { initial: Scan }) {
         setHostNote("Host stopped. Marks keep updating. No new takes.");
         return;
       }
-      const eqNow = equityOf(s);
-      const dd = s.peak > 0 ? (s.peak - eqNow) / s.peak : 0;
-      const risk = riskFor(eqNow);
-      if (s.halted && dd >= risk.brake) {
+      if (s.halted) {
         s.start();
         setParkedAsk(true);
-        setHostNote(`Parked after a ${Math.round(risk.brake * 100)}% drop. Clear the book, then start again.`);
+        setHostNote("Paper session loss limit reached. Reset the paper ledger before restarting.");
         return;
       }
       s.start();
@@ -416,7 +414,7 @@ export function Desk({ initial }: { initial: Scan }) {
               </div>
             ) : null}
           <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <Stat label="Wallet SOL" value={cover == null ? "$0.00" : fmtUsd(cover)} hint={owner ? "verified SOL, not SPL tokens" : "connect a wallet to read it"} />
+            <Stat label="Wallet SOL" value={owner && cover == null ? "—" : fmtUsd(cover ?? 0)} hint={owner ? (cover == null ? "wallet connected; balance unavailable" : "verified SOL, not SPL tokens") : "no wallet detected · $0.00"} />
             <Stat label="AI paper P&L" value={fmtSigned(aiStats.netPnl)} hint="simulated $5 clips, not wallet funds" tone={aiStats.netPnl} />
             <Stat label="Baseline comparator" value={fmtSigned(session)} hint="virtual book, not your balance" tone={session} />
             <Stat
@@ -576,7 +574,7 @@ export function Desk({ initial }: { initial: Scan }) {
         <Panel className="order-6 lg:order-none lg:col-span-5" title="Gates" meta="Saved on this computer">
           <div className="flex flex-col gap-4">
             <div className="flex min-h-11 items-center justify-between gap-3 text-sm">
-              <span>Size with the book</span>
+              <span>Paper clip sizing</span>
               <button
                 type="button"
                 className="press min-h-11 rounded-sm px-2 font-mono text-xs"
@@ -588,14 +586,10 @@ export function Desk({ initial }: { initial: Scan }) {
             <Money
               label="Clip size"
               value={book.config.autoSize === false ? book.config.buyUsd : Math.max(0.01, Math.round(size.clip * 100) / 100)}
-              min={0.01}
+              min={1}
               disabled={book.config.autoSize !== false}
-              hint={
-                book.config.autoSize === false
-                  ? `ceiling · ${size.band} still caps at ${fmtUsd(size.clip)}`
-                  : `${size.band} · ${Math.round(size.risk * 100)}% · ${Math.round(RESERVE * 100)}% stays cash`
-              }
-              onChange={(buyUsd) => book.patch({ buyUsd: Math.max(0.01, buyUsd), autoSize: false })}
+              hint={book.config.autoSize === false ? "manual notional · $5 maximum per clip" : "automatic · fixed $5 paper notional"}
+              onChange={(buyUsd) => book.patch({ buyUsd: Math.max(1, buyUsd), autoSize: false })}
             />
             <Gate
               label="Score floor"
@@ -610,7 +604,7 @@ export function Desk({ initial }: { initial: Scan }) {
               label="Max open"
               display={String(book.config.maxPositions)}
               min={1}
-              max={8}
+              max={4}
               step={1}
               value={book.config.maxPositions}
               onChange={(maxPositions) => book.patch({ maxPositions })}
@@ -651,21 +645,12 @@ export function Desk({ initial }: { initial: Scan }) {
               value={book.config.pollSec}
               onChange={(pollSec) => book.patch({ pollSec })}
             />
-            <Money
-              label="Comparator seed"
-              value={book.config.startingUsd}
-              min={5}
-              hint={book.positions.length > 0 ? "locked while a clip is open" : "virtual only. does not touch the wallet"}
-              disabled={book.positions.length > 0}
-              onChange={(startingUsd) => book.patch({ startingUsd: Math.max(5, startingUsd) })}
-            />
-            <div className="flex gap-2 sm:col-span-2">
-              <p className="text-xs leading-relaxed text-faint">The comparator is a separate virtual book. It is not financed by the wallet, and matching it to a SOL balance is not allowed.</p>
+            <div className="sm:col-span-2">
+              <p className="text-xs leading-relaxed text-faint">Both paper ledgers start at $0 and track realized plus estimated unrealized P&L. Simulated clips use fixed notional and never borrow from or mirror wallet funds.</p>
             </div>
           </div>
           <p className="mt-4 text-xs leading-normal text-faint">
-            A book under $40 takes one clip, about 20% of the book, and flattens after a 20% drop. A larger book still flattens at 4%.
-            When SOL is soft the host demands a higher score before it takes anything. The account is not guaranteed to rise.
+            Paper clips are capped at $5 each, with a $20 combined notional ceiling and an $8 session-loss stop. Configured stop/target levels use estimated net returns after costs. Missing SOL reference data pauses new entries.
           </p>
           <div className="mt-4 flex min-h-11 items-center justify-between gap-3">
             {confirmReset ? (
@@ -1105,7 +1090,7 @@ function BookRow({
   onClose: () => void;
 }) {
   const pct = pnlPct(p);
-  const sol = p.entry > 0 ? p.sizeUsd * (p.mark / p.entry) - p.sizeUsd : 0;
+  const sol = paperExit(p.entry, p.mark, p.sizeUsd, p.markLiquidityUsd ?? 0).pnl - (p.entryFee ?? p.sizeUsd * 0.0125);
   return (
     <li className="flex items-center gap-2 border-b border-line py-2.5 last:border-b-0">
       <div className="min-w-0 flex-1">

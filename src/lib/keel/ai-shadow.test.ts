@@ -85,8 +85,9 @@ test("AI shadow portfolio opens paper positions and never creates live execution
   assert.equal(next.mode, "shadow");
   assert.equal(next.positions.length, 1);
   assert.equal(next.positions[0]?.symbol, "TEST");
-  assert.ok(next.cash < next.startingUsd);
-  assert.ok(aiShadowStats(next).equity < next.startingUsd, "equity should include estimated exit impact and fees");
+  assert.equal(next.startingUsd, 0);
+  assert.equal(next.cash, 0);
+  assert.ok(aiShadowStats(next).equity < 0, "net open P&L includes estimated exit costs");
   assert.equal(next.positions[0]?.markLiquidityUsd, quote.liq);
   assert.equal("signature" in (next.positions[0] ?? {}), false);
   assert.equal(next.trades.length, 0);
@@ -97,7 +98,7 @@ test("AI shadow portfolio closes a paper position and records net outcome", () =
   const closed = advanceAiShadow(opened, scan(2_000, [{ ...quote, price: 126 }]), DEFAULT_CONFIG);
   assert.equal(closed.positions.length, 0);
   assert.equal(closed.trades.length, 1);
-  assert.equal(closed.trades[0]?.reason, "scalp");
+  assert.equal(closed.trades[0]?.reason, "target");
   assert.ok((closed.trades[0]?.pnlUsd ?? 0) > 0);
   assert.ok(aiShadowStats(closed).closedTrades === 1);
 });
@@ -110,8 +111,9 @@ test("AI shadow mode blocks new entries in a falling SOL regime", () => {
 
 test("AI shadow mode flattens once the paper ledger gives back $8", () => {
   const opened = advanceAiShadow(emptyAiShadow(), scan(1_000, [quote]), DEFAULT_CONFIG);
-  opened.cash = 180;
-  opened.peak = 200;
+  opened.cash = -8;
+  opened.realized = -8;
+  opened.peak = 0;
   const crashed = advanceAiShadow(opened, scan(2_000, [quote]), DEFAULT_CONFIG);
   assert.equal(crashed.halted, true);
   assert.equal(crashed.positions.length, 0);
@@ -122,8 +124,9 @@ test("AI shadow mode flattens once the paper ledger gives back $8", () => {
 test("AI shadow mode stops opening positions after its drawdown guard trips", () => {
   const seed = {
     ...emptyAiShadow(),
-    cash: 170,
-    peak: 200,
+    cash: -8,
+    realized: -8,
+    peak: 0,
     halted: true,
   };
   const next = advanceAiShadow(seed, scan(1_000, [quote]), DEFAULT_CONFIG);
@@ -136,6 +139,11 @@ test("AI shadow never exits a position using a stale price when a quote is missi
   const stale = advanceAiShadow(opened, scan(1_000 + 30 * 60_000, []), DEFAULT_CONFIG);
   assert.equal(stale.positions.length, 1);
   assert.equal(stale.trades.length, 0);
+});
+
+test("AI shadow blocks new entries when SOL reference is unavailable", () => {
+  const next = advanceAiShadow(emptyAiShadow(), { ...scan(1_000, [quote]), sol: 0 }, DEFAULT_CONFIG);
+  assert.equal(next.positions.length, 0);
 });
 test("fresh weekly/monthly top-trader buying adds only a small score bonus", () => {
   const topTraderFlow = {
