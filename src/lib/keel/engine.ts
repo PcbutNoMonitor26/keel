@@ -135,14 +135,6 @@ export const DEFAULT_CONFIG: Config = {
   autoSize: true,
 };
 
-type BandName = "pocket" | "keel" | "desk";
-
-function bandOf(eq: number): { name: BandName; sl: number; tp: number; heat: number; risk: number } {
-  if (eq < 40) return { name: "pocket", sl: -8, tp: 12, heat: 0.22, risk: 0.2 };
-  if (eq < 2_000) return { name: "keel", sl: -12, tp: 18, heat: 0.04, risk: 0.04 };
-  return { name: "desk", sl: -10, tp: 16, heat: 0.04, risk: 0.03 };
-}
-
 export function emptyBook(config: Config = DEFAULT_CONFIG): Book {
   return {
     config: { ...config },
