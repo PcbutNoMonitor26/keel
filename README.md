@@ -14,9 +14,11 @@ A name has to clear the score floor, fit the cash reserve, and leave enough curv
 
 ## Exits
 
-The first green round trip is sold. If the clip is still red after 4 seconds, or the curve is too thin to leave, it is sold on the next pass. A red book does not turn the host off. A real 4% drop from the session peak still flattens the book.
+The baseline paper book evaluates configured net stop and target levels after estimated impact and both-side fees, with a 20-minute maximum hold. Losing clips may be scratched after four seconds or sooner when the curve is too thin. The session parks at an $8 peak-to-trough P&L loss. Open positions are never auto-closed using stale marks.
 
 ## The model
+
+Both paper ledgers start at $0 and report realized plus estimated unrealized P&L; simulated notional is not deposited capital. Baseline clips are capped at $5 each and $20 combined exposure; AI shadow uses one $5 maximum clip. Wallet SOL is displayed separately only after a verified wallet connection. The $8 paper session-loss stop is independent of wallet funds.
 
 Closed paper scalps save the readings from the entry. After 80 closes, a small logistic model is fit on the older ones and checked on the later ones. Weights turn on only if that later window is still green after fees. The model can refuse a name. It cannot size a clip up. Until then the rules stay in charge.
 
