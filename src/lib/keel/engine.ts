@@ -490,8 +490,12 @@ export function pinToBook(book: Book, tok: Token): Book {
     blocked: (book.blocked ?? []).filter((address) => address !== tok.address),
     now: book.now > 1e11 ? book.now : Date.now(),
   };
-  if (next.positions.length >= 12) {
-    noted(next, "skip", "Book is holding 12 names. Close one before adding another.");
+  if (next.positions.length >= Math.max(1, Math.min(4, next.config.maxPositions))) {
+    noted(next, "skip", "Paper book position cap reached. Close one before adding another.");
+    return next;
+  }
+  if (!(next.sol > 0)) {
+    noted(next, "skip", "SOL reference unavailable. Manual paper pin blocked.");
     return next;
   }
   const requested = next.config.autoSize === false ? next.config.buyUsd : MAX_PAPER_CLIP_USD;
@@ -656,7 +660,7 @@ export function applyScan(book: Book, scan: Scan): Book {
     }
     next.running = false;
     next.halted = true;
-    noted(next, "info", `Session brake ${Math.round(dd * 100)}%. Book flattened.`);
+    noted(next, "info", `Session brake: ${MAX_SESSION_LOSS_USD.toFixed(2)} peak-to-trough P&L loss. Book flattened.`);
   }
 
   if (!(next.sol > 0)) {
@@ -725,6 +729,10 @@ export function manualBuy(book: Book, address: string): Book {
     seen: [...book.seen],
     learn: book.learn?.buckets ? { ...book.learn, buckets: { ...book.learn.buckets } } : emptyLearn(),
   };
+  if (!(next.sol > 0)) {
+    noted(next, "skip", "SOL reference unavailable. Manual paper buy blocked.");
+    return next;
+  }
   const scored = scoreOf(tok, next.config, next.regime, next.learn);
   if (scored.score < next.config.scoreFloor) {
     noted(next, "skip", `${tok.symbol} blocked · ${scored.reasons[0] ?? "gate"}`);
