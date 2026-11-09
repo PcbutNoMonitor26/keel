@@ -104,7 +104,7 @@ test("mayhem waits without prints and a live fill is the worse price", () => {
   assert.ok((opened.positions[0]?.entry ?? 0) > mayhem.price);
   const closed = applyScan(opened, {
     at: 20_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
-    quotes: [{ ...mayhem, price: mayhem.price * 1.2 }], process: [], note: "",
+    quotes: [{ ...mayhem, price: mayhem.price * 1.5 }], process: [], note: "",
   });
   assert.equal(closed.positions.length, 0);
   assert.equal(closed.learn.n, 1);
