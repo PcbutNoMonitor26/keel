@@ -14,7 +14,8 @@ import {
   pinToBook,
   planClip,
   scoreOf,
-  SESSION_BRAKE,
+  DEFAULT_CONFIG,
+  MAX_PAPER_CLIP_USD,
   type Book,
   type Config,
   type Scan,
@@ -51,29 +52,18 @@ export const useDesk = create<DeskState>()(
   persist(
     (set) => ({
       ...seed,
-      aiShadow: emptyAiShadow(seed.config.startingUsd),
+      aiShadow: emptyAiShadow(),
       aiLearn: emptyLearn(),
       hydrated: false,
       setHydrated: () => set({ hydrated: true }),
       start: () =>
         set((s) => {
-          const eq = equityOf(s);
-          const dd = s.peak > 0 ? (s.peak - eq) / s.peak : 0;
-          if (s.halted && dd >= SESSION_BRAKE) {
-            return {
-              logs: [
-                { t: s.now, kind: "info" as const, text: "Still through the session brake. Reset the book to arm again." },
-                ...s.logs,
-              ].slice(0, 80),
-            };
-          }
+          if (s.halted) return {
+            logs: [{ t: s.now || Date.now(), kind: "info" as const, text: "Paper loss limit reached. Reset the paper ledger before restarting." }, ...s.logs].slice(0, 80),
+          };
           return {
             running: true,
-            halted: false,
-            logs: [
-              { t: s.now, kind: "info" as const, text: "Host armed. Next print can take a trade." },
-              ...s.logs,
-            ].slice(0, 80),
+            logs: [{ t: s.now, kind: "info" as const, text: "Host armed. Next print can take a trade." }, ...s.logs].slice(0, 80),
           };
         }),
       stop: () =>
@@ -168,27 +158,37 @@ export const useDesk = create<DeskState>()(
       commitBuy: (address, signature, rawOut, spent) =>
         set((s) => commitLiveBuy(s, address, signature, rawOut, spent)),
       patch: (partial) =>
-        set((s) => {
-          const config = { ...s.config, ...partial };
-          const flat = s.positions.length === 0;
-          if (flat && partial.startingUsd != null) {
-            const start = partial.startingUsd;
-            return {
-              config: { ...config, buyUsd: Math.min(config.buyUsd, start) },
-              cash: start,
-              realized: 0,
-              peak: start,
-              halted: false,
-              equity: [{ t: s.now, eq: start }],
-              aiShadow: emptyAiShadow(start),
-              aiLearn: emptyLearn(),
-            };
-          }
-          return { config };
-        }),
+        set((s) => ({
+          config: {
+            ...s.config, ...partial, startingUsd: 0,
+            buyUsd: partial.buyUsd == null ? s.config.buyUsd : Math.min(MAX_PAPER_CLIP_USD, Math.max(1, partial.buyUsd)),
+            maxPositions: Math.max(1, Math.min(4, Math.floor(partial.maxPositions ?? s.config.maxPositions))),
+          },
+        })),
     }),
     {
       name: "keel-solana-desk-v3",
+      version: 4,
+      migrate: (persistedState: unknown) => {
+        const saved = (persistedState ?? {}) as Partial<DeskState>;
+        const legacyStart = Math.max(0, Number(saved.config?.startingUsd ?? DEFAULT_CONFIG.startingUsd));
+        const realized = Number.isFinite(Number(saved.realized)) ? Number(saved.realized) : Number(saved.cash ?? legacyStart) - legacyStart;
+        const legacyAi = saved.aiShadow;
+        const legacyAiStart = Math.max(0, Number(legacyAi?.startingUsd ?? legacyStart));
+        const aiRealized = Number(legacyAi?.realized ?? 0);
+        return {
+          ...saved,
+          config: { ...DEFAULT_CONFIG, ...saved.config, startingUsd: 0,
+            buyUsd: Math.min(MAX_PAPER_CLIP_USD, Math.max(1, Number(saved.config?.buyUsd ?? DEFAULT_CONFIG.buyUsd))),
+            maxPositions: Math.max(1, Math.min(4, Math.floor(Number(saved.config?.maxPositions ?? DEFAULT_CONFIG.maxPositions)))) },
+          cash: realized,
+          peak: Math.max(0, Number(saved.peak ?? legacyStart) - legacyStart),
+          equity: (saved.equity ?? []).map((point) => ({ ...point, eq: Number(point.eq) - legacyStart })),
+          aiShadow: legacyAi ? { ...legacyAi, startingUsd: 0, cash: aiRealized,
+            peak: Math.max(0, Number(legacyAi.peak ?? legacyAiStart) - legacyAiStart) } : emptyAiShadow(),
+          running: false, live: false, staged: [],
+        };
+      },
       partialize: (s) => ({
         now: s.now,
         cash: s.cash,
