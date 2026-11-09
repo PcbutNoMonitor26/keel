@@ -6,7 +6,6 @@ import {
   applyScan,
   commitLiveBuy,
   emptyBook,
-  equityOf,
   flatten,
   blockName,
   manualBuy,
