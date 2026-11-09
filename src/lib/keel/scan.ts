@@ -11,8 +11,7 @@ function processTapeCohort(quotes: { topTraderFlow?: { signal: string; reason: s
   return `Tape cohort: ${reads.length} names. ${lead?.signal ?? "mixed"} · ${lead?.reason ?? "repeat wallets"}.`;
 }
 const PUMP_STREAM = "wss://pumpportal.fun/api/data";
-const CACHE_MS = 1_200;
-let cache: { at: number; scan: Scan } | null = null;
+const inFlightScans = new Map<string, Promise<Scan>>();
 type Pair = {
   chainId?: string; dexId?: string; baseToken?: { address?: string; symbol?: string; name?: string };
   priceUsd?: string; liquidity?: { usd?: number }; volume?: { h1?: number };
@@ -39,7 +38,6 @@ let pumpSocket: WebSocket | null = null;
 let pumpRetryAt = 0;
 let pumpFails = 0;
 let lastPumpMsgAt = 0;
-let lastPrintAt = 0;
 let pumpStatus = "Pump.fun launch feed is starting.";
 let lastSolUsd = 0;
 const pumpLaunches = new Map<string, PumpLaunch>();
@@ -85,8 +83,10 @@ async function solTape() {
     solCache = { at: now, tape };
     return tape;
   } catch {
-    if (solCache) return solCache.tape;
-    return { regime: "chop" as Regime, sol: 0, ret1: 0, ret5: 0, sol15: 0, vol1m: 0, note: "SOL reference feed unavailable; trend filter is neutral." };
+    if (solCache && now - solCache.at <= 60_000) {
+      return { ...solCache.tape, note: "SOL reference feed degraded; using a cached reference under 60 seconds old." };
+    }
+    return { regime: "chop" as Regime, sol: 0, ret1: 0, ret5: 0, sol15: 0, vol1m: 0, note: "SOL reference feed unavailable; new entries are paused." };
   }
 }
 function validMint(value: unknown): value is string {
@@ -99,7 +99,6 @@ function pushPrint(launch: PumpLaunch, px: number, at = Date.now()) {
   const last = prints[prints.length - 1];
   if (last && Math.abs(last.px - px) / px < 0.0001 && at - last.t < 800) return;
   prints.push({ t: at, px });
-  lastPrintAt = at;
   if (prints.length > 24) prints.splice(0, prints.length - 24);
 }
 function windowShift(prints: { t: number; px: number }[] | undefined, now: number, windowMs: number): number {
@@ -443,19 +442,16 @@ async function heldQuotes(held: Held[], known: Set<string>): Promise<Quote[]> {
   }
   return missing.flatMap(a => { const p=best.get(a), q=p ? pairQuote(a,p) : null; return q ? [q] : []; });
 }
-let refreshing = false;
-
 export const getScan = createServerFn({ method: "GET" }).validator(readHeld).handler(async ({ data: held }): Promise<Scan> => {
-  if (!refreshing) {
-    refreshing = true;
-    const timer = setTimeout(() => { refreshing = false; }, 3_000);
-    buildScan(held).finally(() => {
-      clearTimeout(timer);
-      refreshing = false;
-    });
-  }
-  if (cache) return { ...cache.scan, at: Date.now() };
-  return buildScan(held);
+  // Coalesce identical requests and preserve the true market observation time.
+  const key = held.map((row) => row.address).sort().join("|");
+  const existing = inFlightScans.get(key);
+  if (existing) return existing;
+  const task = buildScan(held).finally(() => {
+    if (inFlightScans.get(key) === task) inFlightScans.delete(key);
+  });
+  inFlightScans.set(key, task);
+  return task;
 });
 
 async function geckoLiveQuotes(now: number): Promise<{ quotes: Quote[]; note: string }> {
@@ -497,7 +493,10 @@ async function geckoLiveQuotes(now: number): Promise<{ quotes: Quote[]; note: st
     geckoCache = { at: now, value };
     return value;
   } catch {
-    return geckoCache?.value ?? { quotes: [], note: "GeckoTerminal new-pool feed is quiet. Launch stream still running." };
+    if (geckoCache && now - geckoCache.at <= 30_000) {
+      return { ...geckoCache.value, note: "GeckoTerminal feed degraded; using cached pool quotes under 30 seconds old." };
+    }
+    return { quotes: [], note: "GeckoTerminal feed unavailable; no fresh pool quotes are being used." };
   }
 }
 
@@ -529,9 +528,9 @@ async function buildScan(held: Held[]): Promise<Scan> {
   let quotes = mergeQuotes(pump.quotes, gecko.quotes);
   const heldIds = new Set(held.map((row) => row.address));
   const ranked = quotes.map((q) => ({ q, scored: scoreOf(q, DEFAULT_CONFIG, tape.regime) }));
-  const visible = ranked.filter((row) => row.scored.score > 0 || heldIds.has(row.q.address)).map((row) => row.q);
+  const visible = ranked.filter((row) => (tape.sol > 0 && row.scored.score > 0) || heldIds.has(row.q.address)).map((row) => row.q);
   const mayhem = quotes.filter((q) => q.mayhem);
-  const lead = [...ranked].sort((a, b) => b.scored.score - a.scored.score)[0];
+  const lead = tape.sol > 0 ? [...ranked].sort((a, b) => b.scored.score - a.scored.score)[0] : undefined;
   const process = [
     `Watching ${quotes.length} names. ${ranked.filter((row) => row.scored.score > 0).length} scored above 0. The rest stay in the background.`,
     pump.note,
@@ -548,6 +547,5 @@ async function buildScan(held: Held[]): Promise<Scan> {
     try { const marks = await heldQuotes(held,new Set(quotes.map(q=>q.address))); scan={...scan,quotes:[...quotes,...marks]}; }
     catch { scan={...scan,note:[scan.note,"One or more held-token marks could not be refreshed."].filter(Boolean).join(" ")}; }
   }
-  if (held.length === 0) cache = { at: now, scan };
   return scan;
 }
