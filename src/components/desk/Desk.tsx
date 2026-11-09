@@ -80,13 +80,14 @@ export function Desk({ initial }: { initial: Scan }) {
     };
   }, [refresh, ingest, pollSec, hydrated, initial]);
 
-  const tokens = book.tokens.length > 0 ? book.tokens : initial.quotes;
-  const regime = book.tokens.length > 0 ? book.regime : initial.regime;
+  const hasScan = book.now > 0;
+  const tokens = hasScan ? book.tokens : initial.quotes;
+  const regime = hasScan ? book.regime : initial.regime;
   const shown = tokens.filter((tok) => scoreOf(tok, book.config, regime, book.learn ?? emptyLearn()).score > 0);
-  const sol = book.sol || initial.sol;
-  const ret1 = book.tokens.length > 0 ? book.ret1 : initial.ret1;
-  const ret5 = book.tokens.length > 0 ? book.ret5 : initial.ret5;
-  const sol15 = book.tokens.length > 0 ? book.sol15 : initial.sol15;
+  const sol = hasScan ? book.sol : initial.sol;
+  const ret1 = hasScan ? book.ret1 : initial.ret1;
+  const ret5 = hasScan ? book.ret5 : initial.ret5;
+  const sol15 = hasScan ? book.sol15 : initial.sol15;
   const eq = equityOf(book);
   const session = eq;
   const size = stopsFor(eq, book.config);
