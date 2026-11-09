@@ -394,7 +394,7 @@ export function paperExit(
   sizeUsd: number,
   liq: number,
 ): { exitPx: number; proceeds: number; pnl: number; pct: number; impact: number } {
-  const impact = liq > 0 ? impactOf(sizeUsd, liq) : 0.01;
+  const impact = impactOf(sizeUsd, liq);
   const exitPx = mark > 0 ? mark * (1 - impact) : 0;
   const gross = entry > 0 ? sizeUsd * (exitPx / entry) : 0;
   const proceeds = Math.max(0, gross * 0.9875);
@@ -431,6 +431,7 @@ export function equityOf(book: Book): number {
 }
 
 export function planClip(book: Book, tok: Token): { ok: true; clip: number } | { ok: false; error: string } {
+  if (!(tok.price > 0)) return { ok: false, error: "fresh positive price unavailable" };
   if (book.positions.some((p) => p.address === tok.address)) return { ok: false, error: "already open" };
   const maxPositions = Math.max(1, Math.min(4, Math.floor(book.config.maxPositions)));
   if (book.positions.length >= maxPositions) return { ok: false, error: "book full" };
