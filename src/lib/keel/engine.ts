@@ -277,6 +277,7 @@ export function scoreOf(
     if (q.liq < 300) return { score: 0, reasons: [`mayhem curve ${fmtUsd(q.liq)}`] };
     if (q.change5m >= 22) return { score: 0, reasons: [`mayhem late +${q.change5m.toFixed(0)}%`] };
     if (move <= -12) return { score: 0, reasons: [`mayhem dump ${move.toFixed(0)}%`] };
+    if (move < 3) return { score: 0, reasons: ["flat tape, the fee would take it"] };
     const wallets = (q.uniqueTraders ?? 0) >= 6 && q.buys >= 8 && q.sells >= 1 && q.buys > q.sells;
     const dexFlow = q.dex !== "pump.fun" && q.buys >= 8 && q.sells >= 2 && q.buys > q.sells;
     if (!wallets && !dexFlow) return { score: 0, reasons: ["mayhem waiting on wallet prints"] };
@@ -315,6 +316,7 @@ export function scoreOf(
     if (q.liq > 150000) return { score: 0, reasons: ["launch liquidity above discovery range"] };
     if (move >= 70) return { score: 0, reasons: [`blow-off +${move.toFixed(0)}%`] };
     if (move <= -15) return { score: 0, reasons: [`dump ${move.toFixed(0)}%`] };
+    if (move < 3) return { score: 0, reasons: ["flat tape, the fee would take it"] };
     if (q.buys < 8 || q.sells < 2 || q.buys <= q.sells) {
       if (!trench) return { score: 0, reasons: [`flow ${q.buys}/${q.sells}`] };
     }
@@ -342,6 +344,7 @@ export function scoreOf(
   if (q.liq < cfg.minLiq) return { score: 0, reasons: [`liq ${fmtUsd(q.liq)}`] };
   if (q.vol1h < 5000 && q.buys + q.sells < 40) return { score: 0, reasons: ["thin tape"] };
   if (move <= -8) return { score: 0, reasons: [`5m ${move.toFixed(0)}%`] };
+  if (move < 3) return { score: 0, reasons: ["flat tape, the fee would take it"] };
   if (move >= 35) return { score: 0, reasons: [`blow-off +${move.toFixed(0)}%`] };
   if (q.sells > q.buys * 1.35 && q.sells > 20) return { score: 0, reasons: ["distribution"] };
 
@@ -377,6 +380,7 @@ function finish(score: number, reasons: string[], q: Quote, learn: LearnState | 
   let next = Math.max(0, Math.min(100, score));
   if (learn && next > 0) {
     const adj = laneAdjust(learn, featuresOf(q));
+    if (adj.block) return { score: 0, reasons: [`${adj.note || "lane"} is not paying after fees`] };
     if (adj.penalty !== 0) {
       next = Math.max(0, Math.min(100, next - adj.penalty));
       reasons.push(`learned ${adj.penalty > 0 ? "+" : ""}${adj.penalty}`);

@@ -431,7 +431,7 @@ export function Desk({ initial }: { initial: Scan }) {
 
       <main className="mx-auto grid min-w-0 max-w-6xl gap-3 px-4 py-3 lg:grid-cols-12 lg:gap-4 lg:px-6 lg:py-4">
         <Panel className="order-4 lg:order-none lg:col-span-12" title="Process" meta={ago > 0 ? `updated ${ago}s ago` : "live"}>
-          <LiveProcess tokens={tokens} positions={book.positions} regime={regime} process={process} ago={ago} />
+          <LiveProcess tokens={tokens} positions={book.positions} regime={regime} process={process} ago={ago} halted={book.halted} />
         </Panel>
         <Panel className="order-5 lg:order-none lg:col-span-12" title="Paper proof" meta="LIVE MID · NOT A BACKTEST">
           <p className="text-sm text-muted">{proofLine(book.learn ?? emptyLearn())}</p>
@@ -792,12 +792,14 @@ function LiveProcess({
   regime,
   process,
   ago,
+  halted,
 }: {
   tokens: Token[];
   positions: Position[];
   regime: Book["regime"];
   process: string[];
   ago: number;
+  halted: boolean;
 }) {
   let best: { symbol: string; score: number } | null = null;
   for (const tok of tokens) {
@@ -806,7 +808,9 @@ function LiveProcess({
   }
   const greens = positions.filter((p) => p.entryMid && p.mark > p.entryMid).length;
   const fading = positions.filter((p) => p.entryMid && p.mark < p.entryMid * 0.96).length;
-  const headline = positions.length > 0
+  const headline = halted
+    ? "Parked. This book gave back 4% from its peak, so it will not take another clip until you clear it."
+    : positions.length > 0
     ? `${positions.length} in the book. ${greens} above the entry. ${fading} fading.`
     : best && best.score > 0
       ? `Watching ${tokens.length} names. Strongest read is ${best.symbol}.`

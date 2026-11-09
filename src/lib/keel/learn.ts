@@ -65,14 +65,20 @@ export function recordLane(state: LearnState, features: string[], pnlPct: number
   return { ...state, buckets };
 }
 
-export function laneAdjust(state: LearnState, features: string[]): { penalty: number; sizeMul: number; note: string } {
+export function laneAdjust(state: LearnState, features: string[]): { penalty: number; sizeMul: number; note: string; block: boolean } {
   let penalty = 0;
   let sizeMul = 1;
+  let block = false;
   const notes: string[] = [];
   for (const key of features) {
     const bucket = state.buckets[key];
     if (!bucket || bucket.n < 2) continue;
     const avg = bucket.sumR / bucket.n;
+    if (bucket.n >= 8 && avg <= 0) {
+      block = true;
+      notes.push(`${key} ${avg.toFixed(1)}%`);
+      continue;
+    }
     const ugly = bucket.n >= 2 && avg <= -8;
     const soft = bucket.n >= 3 && avg <= -4;
     const mature = bucket.n >= 5;
@@ -93,6 +99,7 @@ export function laneAdjust(state: LearnState, features: string[]): { penalty: nu
     penalty: Math.max(-8, Math.min(18, penalty)),
     sizeMul: Math.max(0.35, Math.min(1, sizeMul)),
     note: notes.slice(0, 3).join(", "),
+    block,
   };
 }
 
@@ -112,5 +119,5 @@ export function learnSummary(state: LearnState): string {
   const parts = Object.entries(state.buckets)
     .filter(([, bucket]) => bucket.n >= 5)
     .map(([key, bucket]) => `${key} ${bucket.n}× ${(bucket.sumR / bucket.n).toFixed(1)}%`);
-  return parts.length ? `Learned: ${parts.join(" · ")}. Losing lanes get harder and smaller.` : "Learned: no lane has 5 closes yet. Two ugly closes still shrink that lane.";
+  return parts.length ? `Learned: ${parts.join(" · ")}. A lane that is red after 8 closes is turned off.` : "Learned: no lane has 5 closes yet. Two ugly closes still shrink that lane.";
 }

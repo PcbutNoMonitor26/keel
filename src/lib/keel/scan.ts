@@ -13,8 +13,6 @@ function processTapeCohort(quotes: { topTraderFlow?: { signal: string; reason: s
 const PUMP_STREAM = "wss://pumpportal.fun/api/data";
 const CACHE_MS = 1_200;
 let cache: { at: number; scan: Scan } | null = null;
-let inflight: Promise<Scan> | null = null;
-let inflightAt = 0;
 type Pair = {
   chainId?: string; dexId?: string; baseToken?: { address?: string; symbol?: string; name?: string };
   priceUsd?: string; liquidity?: { usd?: number }; volume?: { h1?: number };
@@ -445,25 +443,19 @@ async function heldQuotes(held: Held[], known: Set<string>): Promise<Quote[]> {
   }
   return missing.flatMap(a => { const p=best.get(a), q=p ? pairQuote(a,p) : null; return q ? [q] : []; });
 }
+let refreshing = false;
+
 export const getScan = createServerFn({ method: "GET" }).validator(readHeld).handler(async ({ data: held }): Promise<Scan> => {
-  const now = Date.now();
-  if (cache && now - cache.at < CACHE_MS && held.length === 0 && lastPrintAt <= cache.at) return cache.scan;
-  if (held.length === 0 && inflight) return cache?.scan ?? inflight;
-  const run = buildScan(held).finally(() => {
-    if (held.length === 0 && inflight === run) inflight = null;
-  });
-  if (held.length === 0) {
-    inflight = run;
-    inflightAt = now;
+  if (!refreshing) {
+    refreshing = true;
+    const timer = setTimeout(() => { refreshing = false; }, 3_000);
+    buildScan(held).finally(() => {
+      clearTimeout(timer);
+      refreshing = false;
+    });
   }
-  if (!cache) return run;
-  const heldCache = cache.scan;
-  return Promise.race([
-    run,
-    new Promise<Scan>((resolve) => {
-      setTimeout(() => resolve({ ...heldCache, at: Date.now() }), 1_200);
-    }),
-  ]);
+  if (cache) return { ...cache.scan, at: Date.now() };
+  return buildScan(held);
 });
 
 async function geckoLiveQuotes(now: number): Promise<{ quotes: Quote[]; note: string }> {

@@ -154,7 +154,10 @@ export function analyzeOpportunity(
   ];
   if (learn && score > 0) {
     const adj = laneAdjust(learn, featuresOf(q));
-    if (adj.penalty !== 0) {
+    if (adj.block) {
+      score = 0;
+      riskFlags.push(`${adj.note || "lane"} is not paying after fees`);
+    } else if (adj.penalty !== 0) {
       score = Math.round(clamp(score - adj.penalty));
       reasons.push(`learned ${adj.penalty > 0 ? "+" : ""}${adj.penalty}`);
     }

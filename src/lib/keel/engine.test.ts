@@ -241,6 +241,19 @@ test("a red clip is sold once it has had four seconds and the host stays on", ()
   assert.equal(next.halted, false);
 });
 
+test("a flat tape and a lane that already lost its fees are not taken", () => {
+  const pump = {
+    ...token, dex: "pump.fun", pumpFun: true, ageMin: 2, minutes: 2,
+    liq: 20_000, buys: 20, sells: 6, change5m: 1, uniqueTraders: 8, preMigration: false,
+  };
+  assert.equal(scoreOf(pump, DEFAULT_CONFIG, "up").score, 0);
+  const moving = { ...pump, change5m: 8 };
+  assert.ok(scoreOf(moving, DEFAULT_CONFIG, "up").score > 0);
+  let learn = emptyLearn();
+  for (let i = 0; i < 8; i++) learn = recordOutcome(learn, ["pump"], -2.2, -0.3);
+  assert.equal(scoreOf(moving, DEFAULT_CONFIG, "up", learn).score, 0);
+});
+
 test("a nonsense SOL print is refused and a real dip is a down day", () => {
   assert.equal(tapeFromCloses([0, 0, 0]), null);
   assert.equal(tapeFromCloses([1_000_000, 90, 90, 90, 90, 90]), null);
