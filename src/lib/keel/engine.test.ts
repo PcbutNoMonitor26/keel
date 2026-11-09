@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
+import { DEFAULT_CONFIG, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, tapeFromCloses } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
@@ -9,12 +9,13 @@ const token = {
   dex: "raydium", side: "long" as const, assetId: "", mins: 1, minutes: 0, edge: 0, fair: 0, endsAt: 0,
 };
 
-test("empty book starts with configured cash and no live positions", () => {
+test("empty paper book starts at zero P&L and no live positions", () => {
   const book = emptyBook();
-  assert.equal(book.cash, DEFAULT_CONFIG.startingUsd);
+  assert.equal(DEFAULT_CONFIG.startingUsd, 0);
+  assert.equal(book.cash, 0);
   assert.equal(book.positions.length, 0);
   assert.equal(book.live, false);
-  assert.equal(equityOf(book), DEFAULT_CONFIG.startingUsd);
+  assert.equal(equityOf(book), 0);
 });
 
 test("open baseline paper positions are marked at net liquidation value", () => {
@@ -47,13 +48,12 @@ test("Solana token scoring uses liquidity and flow gates", () => {
   assert.equal(scoreOf({ ...token, liq: 10 }, DEFAULT_CONFIG, "up").score, 0);
 });
 
-test("clip plan respects reserve and position cap", () => {
+test("zero-seeded paper clip plan respects notional and position caps", () => {
   const book = emptyBook();
-  const plan = planClip(book, token);
-  assert.equal(plan.ok, true);
-  if (plan.ok) assert.ok(book.cash - plan.clip - plan.clip * 0.0125 >= book.cash * 0.35 - 0.02);
+  assert.deepEqual(planClip(book, token), { ok: true, clip: 5 });
+  assert.equal(book.cash, 0);
   const full = { ...book, positions: Array.from({ length: book.config.maxPositions }, (_, i) => ({
-    address: String(i), symbol: "X", venue: "sol" as const, side: "long" as const, sizeUsd: 1, entry: 1, mark: 1,
+    address: String(i), symbol: "X", venue: "sol" as const, side: "long" as const, sizeUsd: 5, entry: 1, mark: 1,
     score: 70, reasons: [], openedAt: 1, endsAt: 0, signature: "", rawOut: "", assetId: "",
   })) };
   assert.deepEqual(planClip(full, token), { ok: false, error: "book full" });
@@ -111,13 +111,14 @@ test("mayhem waits without prints and a live fill is the worse price", () => {
   assert.match(closed.logs.map((l) => l.text).join("\n"), /not a fill/);
 });
 
-test("a book already down like a parked $174 session is flattened, not left open", () => {
+test("a paper ledger past its absolute loss limit is flattened", () => {
   const book = emptyBook();
-  book.peak = 200;
-  book.cash = 153;
+  book.cash = -10;
+  book.realized = -10;
   book.positions = [{
-    address: token.address, symbol: "SCAM", venue: "sol", side: "long", sizeUsd: 30, entry: 1, mark: 0.7,
+    address: token.address, symbol: "SCAM", venue: "sol", side: "long", sizeUsd: 5, entry: 1, mark: 0.7,
     score: 70, reasons: ["live"], openedAt: 1, endsAt: 0, signature: "", rawOut: "", assetId: "",
+    entryFee: 0.0625, markLiquidityUsd: 50,
   }];
   const next = applyScan(book, {
     at: 5_000, regime: "chop", sol: 90, ret1: 0, ret5: 0, sol15: 0.3, vol1m: 0.2,
@@ -126,7 +127,7 @@ test("a book already down like a parked $174 session is flattened, not left open
   assert.equal(next.halted, true);
   assert.equal(next.running, false);
   assert.equal(next.positions.length, 0);
-  assert.ok(equityOf(next) > 160);
+  assert.ok(equityOf(next) < -8);
 });
 
 test("logged mayhem losses make the next mayhem score harder", () => {
@@ -147,30 +148,24 @@ test("baseline paper exit includes the conservative 1.25% venue fee", () => {
   assert.ok(Math.abs(exit.proceeds - 10 * (1 - exit.impact) * 0.9875) < 1e-12);
 });
 
-test("a paper profit enlarges the next clip without spending the book", () => {
-  const clip = redeployClip(5, 5.31, 205);
-  assert.ok(clip > 5);
-  assert.ok(clip <= 205 * 0.08 + 1e-9);
-  assert.ok(clip < 100);
+test("paper notional does not compound with profit", () => {
+  const book = emptyBook();
+  book.cash = 50;
+  book.realized = 50;
+  assert.deepEqual(planClip(book, token), { ok: true, clip: 5 });
 });
 
-test("a five dollar book can take one clip and a soft market demands more", () => {
-  const book = emptyBook();
-  book.cash = 5;
-  book.peak = 5;
-  book.config = { ...book.config, startingUsd: 5 };
-  const plan = planClip(book, token);
-  assert.equal(plan.ok, true);
-  if (plan.ok) assert.ok(plan.clip <= 1.01 && plan.clip >= 0.5);
-  const opened = applyScan(book, {
+test("zero-seeded paper clip opens and down SOL blocks entries", () => {
+  const opened = applyScan(emptyBook(), {
     at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
     quotes: [token], process: [], note: "",
   });
-  const soft = applyScan({ ...book, regime: "down" }, {
+  const soft = applyScan(emptyBook(), {
     at: 1_000, regime: "down", sol: 150, ret1: -0.4, ret5: -1, sol15: -1, vol1m: 0.2,
     quotes: [token], process: [], note: "",
   });
-  assert.ok(opened.positions.length >= soft.positions.length);
+  assert.equal(opened.positions.length, 1);
+  assert.equal(soft.positions.length, 0);
   assert.equal(marketBump("down"), 8);
 });
 
@@ -226,7 +221,8 @@ test("a red clip is sold once it has had four seconds and the host stays on", ()
   const book = emptyBook();
   book.running = true;
   book.realized = -1.59;
-  book.cash = 198;
+  book.cash = -1.59;
+  book.peak = 0;
   book.positions = [{
     address: token.address, symbol: "FNUT", venue: "sol", side: "long", sizeUsd: 5, entry: 1, mark: 1,
     score: 70, reasons: ["pinned"], openedAt: 1_000, endsAt: 0, signature: "", rawOut: "", assetId: "",
@@ -252,6 +248,27 @@ test("a flat tape and a lane that already lost its fees are not taken", () => {
   let learn = emptyLearn();
   for (let i = 0; i < 8; i++) learn = recordOutcome(learn, ["pump"], -2.2, -0.3);
   assert.equal(scoreOf(moving, DEFAULT_CONFIG, "up", learn).score, 0);
+});
+
+test("missing SOL reference blocks paper entries", () => {
+  const next = applyScan(emptyBook(), {
+    at: 1_000, regime: "chop", sol: 0, ret1: 0, ret5: 0, sol15: 0, vol1m: 0,
+    quotes: [token], process: [], note: "SOL reference unavailable",
+  });
+  assert.equal(next.positions.length, 0);
+});
+
+test("baseline keeps open positions when fresh quote is missing", () => {
+  const opened = applyScan(emptyBook(), {
+    at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [token], process: [], note: "",
+  });
+  const missing = applyScan(opened, {
+    at: 20_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [], process: [], note: "held quote unavailable",
+  });
+  assert.equal(missing.positions.length, 1);
+  assert.equal(missing.learn.n, 0);
 });
 
 test("a nonsense SOL print is refused and a real dip is a down day", () => {
