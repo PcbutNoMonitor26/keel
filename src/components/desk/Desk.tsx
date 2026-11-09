@@ -91,7 +91,7 @@ export function Desk({ initial }: { initial: Scan }) {
   const eq = equityOf(book);
   const session = eq;
   const size = stopsFor(eq, book.config);
-  const process = (book.process ?? []).length > 0 ? book.process : (initial.process ?? []);
+  const process = hasScan ? (book.process ?? []) : (initial.process ?? []);
   const [tick, setTick] = useState(0);
   const [pick, setPick] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
