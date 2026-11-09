@@ -118,6 +118,10 @@ export type Scan = {
 export const SOL_MIN_USD = 1;
 export const RESERVE = 0.35;
 export const SESSION_BRAKE = 0.04;
+export const MAX_SESSION_LOSS_USD = 8;
+export const MAX_PAPER_CLIP_USD = 5;
+export const MAX_PAPER_EXPOSURE_USD = 20;
+const MAX_PAPER_HOLD_MS = 20 * 60_000;
 
 export const DEFAULT_CONFIG: Config = {
   pollSec: 4,
@@ -127,7 +131,7 @@ export const DEFAULT_CONFIG: Config = {
   slPct: -20,
   tpPct: 40,
   scoreFloor: 62,
-  startingUsd: 200,
+  startingUsd: 0,
   autoSize: true,
 };
 
@@ -142,9 +146,10 @@ function bandOf(eq: number): { name: BandName; sl: number; tp: number; heat: num
 export function emptyBook(config: Config = DEFAULT_CONFIG): Book {
   return {
     config: { ...config },
-    cash: config.startingUsd,
+    // cash is realized paper P&L, not spendable capital.
+    cash: 0,
     realized: 0,
-    peak: config.startingUsd,
+    peak: 0,
     positions: [],
     tokens: [],
     seen: [],
@@ -197,7 +202,10 @@ export function fmtClock(t: number): string {
 }
 
 export function pnlPct(p: Position): number {
-  return p.entry > 0 ? ((p.mark / p.entry) - 1) * 100 : 0;
+  if (!(p.entry > 0) || !(p.sizeUsd > 0)) return 0;
+  const exit = paperExit(p.entry, p.mark, p.sizeUsd, p.markLiquidityUsd ?? 0);
+  const net = exit.pnl - (p.entryFee ?? fee(p.sizeUsd));
+  return (net / p.sizeUsd) * 100;
 }
 
 export function coinMin(quotes: { mins: number }[]): number {
@@ -206,18 +214,9 @@ export function coinMin(quotes: { mins: number }[]): number {
   return Math.min(...lots);
 }
 
-export function riskFor(eq: number): { minLot: number; heat: number; brake: number; slots: number; floorBump: number } {
-  if (eq < 40) {
-    const minLot = Math.min(SOL_MIN_USD, Math.max(0.5, Math.round(eq * 0.2 * 100) / 100));
-    return { minLot, heat: 0.22, brake: 0.2, slots: 1, floorBump: 6 };
-  }
-  return { minLot: SOL_MIN_USD, heat: SESSION_BRAKE, brake: SESSION_BRAKE, slots: 1, floorBump: 0 };
-}
-
-export function redeployClip(base: number, profit: number, eq: number): number {
-  const grown = base + Math.max(0, profit) * 0.5;
-  const ceiling = Math.max(base, Math.max(0, eq) * 0.08);
-  return Math.min(Math.max(base, grown), ceiling);
+export function riskFor(_eq: number): { minLot: number; heat: number; brake: number; slots: number; floorBump: number } {
+  // P&L-only paper has no bankroll to size against; use fixed notional controls.
+  return { minLot: SOL_MIN_USD, heat: 0.04, brake: SESSION_BRAKE, slots: 4, floorBump: 0 };
 }
 
 export function tapeFromCloses(closes: number[]): { regime: Regime; sol: number; ret1: number; ret5: number; sol15: number; vol1m: number } | null {
@@ -241,15 +240,10 @@ export function marketBump(regime: Regime): number {
   return 0;
 }
 
-export function stopsFor(eq: number, cfg: Config): { sl: number; tp: number; band: BandName; heat: number; risk: number; clip: number } {
-  const band = bandOf(eq);
-  const risk = riskFor(eq);
-  const sl = band.name === "keel" ? cfg.slPct : eq < 40 ? -8 : band.sl;
-  const tp = band.name === "keel" ? cfg.tpPct : eq < 40 ? 12 : band.tp;
-  const riskBudget = eq < 40 ? risk.minLot : Math.min(eq * band.risk, eq * SESSION_BRAKE);
-  const base = cfg.autoSize === false ? Math.min(cfg.buyUsd, riskBudget) : riskBudget;
-  const clip = redeployClip(base, eq - cfg.startingUsd, eq);
-  return { sl, tp, band: band.name, heat: risk.heat, risk: band.risk, clip };
+export function stopsFor(_eq: number, cfg: Config): { sl: number; tp: number; band: BandName; heat: number; risk: number; clip: number } {
+  const requested = cfg.autoSize === false ? cfg.buyUsd : MAX_PAPER_CLIP_USD;
+  const clip = Math.max(SOL_MIN_USD, Math.min(MAX_PAPER_CLIP_USD, Number.isFinite(requested) ? requested : MAX_PAPER_CLIP_USD));
+  return { sl: cfg.slPct, tp: cfg.tpPct, band: "pocket", heat: 0.04, risk: 0.01, clip };
 }
 
 function liveMove(q: Quote): number {
@@ -428,41 +422,25 @@ function noted(book: Book, kind: LogLine["kind"], text: string) {
 }
 
 export function equityOf(book: Book): number {
+  // Realized net P&L plus estimated net liquidation P&L for open positions.
   const open = book.positions.reduce((sum, p) => {
     const exit = paperExit(p.entry, p.mark, p.sizeUsd, p.markLiquidityUsd ?? 0);
-    return sum + exit.proceeds;
+    return sum + exit.pnl - (p.entryFee ?? fee(p.sizeUsd));
   }, 0);
   return book.cash + open;
 }
 
 export function planClip(book: Book, tok: Token): { ok: true; clip: number } | { ok: false; error: string } {
-  const eq = equityOf(book);
-  const risk = riskFor(eq);
   if (book.positions.some((p) => p.address === tok.address)) return { ok: false, error: "already open" };
-  if (book.positions.length >= Math.min(book.config.maxPositions, risk.slots)) return { ok: false, error: "book full" };
-  const floor = Math.max(risk.minLot, tok.mins > 0 ? tok.mins : SOL_MIN_USD);
-  const reserveCash = eq * (eq < 40 ? 0.2 : RESERVE);
-  const budget = Math.max(0, (book.cash - reserveCash) / 1.0125);
-  if (budget + 1e-9 < floor) return { ok: false, error: `${eq < 40 ? 20 : Math.round(RESERVE * 100)}% reserve holds ${fmtUsd(reserveCash)}` };
-  const open = book.positions.reduce((s, p) => s + p.sizeUsd, 0);
-  const budgeted = stopsFor(eq, book.config).clip;
-  const heatCap = Math.max(risk.heat, Math.min(0.08, budgeted / Math.max(eq, 1)));
-  const heatRoom = heatCap * eq - open;
-  if (heatRoom + 1e-9 < floor) return { ok: false, error: `heat cap ${Math.round(heatCap * 100)}%` };
-  const peak = Math.max(book.peak, eq);
-  const lossRoom = Math.max(eq - peak * (1 - risk.brake), Math.min(budgeted, eq * 0.08));
-  if (lossRoom + 1e-9 < floor) return { ok: false, error: "session brake" };
-  const room = Math.min(budget, heatRoom, lossRoom);
-  let clip = Math.min(budgeted, room, book.cash);
-  if (book.positions.length >= 2) clip *= 0.5;
-  if (clip < floor) {
-    if (room + 1e-9 >= floor) clip = Math.min(floor, room);
-    else return { ok: false, error: `min lot ${fmtUsd(floor)}` };
-  }
-  if (clip <= 0 || book.cash - clip - fee(clip) < reserveCash - 0.02) {
-    return { ok: false, error: `would spend the ${Math.round(RESERVE * 100)}% reserve` };
-  }
-  if (book.cash < clip + fee(clip)) return { ok: false, error: `cash under ${fmtUsd(floor)}` };
+  const maxPositions = Math.max(1, Math.min(4, Math.floor(book.config.maxPositions)));
+  if (book.positions.length >= maxPositions) return { ok: false, error: "book full" };
+  const floor = Math.max(SOL_MIN_USD, tok.mins > 0 ? tok.mins : SOL_MIN_USD);
+  const requested = book.config.autoSize === false ? book.config.buyUsd : MAX_PAPER_CLIP_USD;
+  const clip = Math.min(MAX_PAPER_CLIP_USD, Number.isFinite(requested) ? requested : MAX_PAPER_CLIP_USD);
+  if (!(clip >= floor)) return { ok: false, error: `minimum lot ${fmtUsd(floor)} exceeds the ${fmtUsd(MAX_PAPER_CLIP_USD)} paper clip cap` };
+  const openNotional = book.positions.reduce((sum, position) => sum + position.sizeUsd, 0);
+  if (openNotional + clip > MAX_PAPER_EXPOSURE_USD + 1e-9) return { ok: false, error: "paper exposure cap reached" };
+  if (!scalpPays(clip, tok.liq)) return { ok: false, error: "estimated impact and fees exceed the scalp hurdle" };
   return { ok: true, clip };
 }
 
@@ -472,14 +450,14 @@ function close(book: Book, address: string, why: string, liq: number) {
   const exit = paperExit(p.entry, p.mark, p.sizeUsd, liq || p.markLiquidityUsd || 0);
   const entryFee = p.entryFee ?? fee(p.sizeUsd);
   const pnl = exit.pnl - entryFee;
-  book.cash += exit.proceeds;
+  book.cash += pnl;
   book.realized += pnl;
   book.positions = book.positions.filter((item) => item.address !== address);
   if (!book.seen.includes(address)) book.seen.push(address);
-  book.learn = recordOutcome(book.learn, p.features ?? [], exit.pct, pnl);
+  const netPct = p.sizeUsd > 0 ? (pnl / p.sizeUsd) * 100 : 0;
+  book.learn = recordOutcome(book.learn, p.features ?? [], netPct, pnl);
   if (p.readings?.length) {
-    const pct = p.sizeUsd > 0 ? (pnl / p.sizeUsd) * 100 : 0;
-    book.model = noteSample(book.model ?? emptyModel(), p.readings, pct, book.now);
+    book.model = noteSample(book.model ?? emptyModel(), p.readings, netPct, book.now);
   }
   noted(book, "sell", `Closed ${p.symbol} · ${why}. Paper, not a fill.`);
 }
@@ -516,11 +494,15 @@ export function pinToBook(book: Book, tok: Token): Book {
     noted(next, "skip", "Book is holding 12 names. Close one before adding another.");
     return next;
   }
-  const reserve = Math.max(0, equityOf(next) * 0.2);
-  const room = Math.max(0, (next.cash - reserve) / 1.0125);
-  const clip = Math.min(5, room);
-  if (clip < 1) {
-    noted(next, "skip", `${tok.symbol} stays on the tape. Cash is inside the reserve.`);
+  const requested = next.config.autoSize === false ? next.config.buyUsd : MAX_PAPER_CLIP_USD;
+  const clip = Math.min(MAX_PAPER_CLIP_USD, Number.isFinite(requested) ? requested : MAX_PAPER_CLIP_USD);
+  const floor = Math.max(SOL_MIN_USD, tok.mins > 0 ? tok.mins : SOL_MIN_USD);
+  if (clip < floor) {
+    noted(next, "skip", `${tok.symbol} stays on the tape. Minimum lot exceeds the paper clip cap.`);
+    return next;
+  }
+  if (next.positions.reduce((sum, position) => sum + position.sizeUsd, 0) + clip > MAX_PAPER_EXPOSURE_USD) {
+    noted(next, "skip", `${tok.symbol} stays on the tape. Paper exposure cap reached.`);
     return next;
   }
   const slip = impactOf(clip, tok.liq);
@@ -529,7 +511,7 @@ export function pinToBook(book: Book, tok: Token): Book {
     return next;
   }
   const entryFee = fee(clip);
-  next.cash -= clip + entryFee;
+  // Simulated notional is tracked on the position; cash is realized P&L only.
   next.positions.push({
     address: tok.address,
     symbol: tok.symbol,
@@ -570,7 +552,7 @@ function tryBuy(book: Book, tok: Token, score: number, reasons: string[]) {
     return;
   }
   const entryFee = fee(clip);
-  book.cash -= clip + entryFee;
+  // Simulated notional is tracked on the position; cash is realized P&L only.
   book.positions.push({
     address: tok.address,
     symbol: tok.symbol,
@@ -638,20 +620,21 @@ export function applyScan(book: Book, scan: Scan): Book {
   for (const p of [...next.positions]) {
     const tok = byAddr.get(p.address);
     if (!tok || tok.price <= 0) {
-      const age = p.openedAt > 0 ? next.now - p.openedAt : 0;
-      if (!p.signature && age >= 8_000 && p.mark > 0) {
-        const stale = paperExit(p.entry, p.mark, p.sizeUsd, p.markLiquidityUsd || 0);
-        if (stale.pnl <= 0) close(next, p.address, "no quote", p.markLiquidityUsd || 0);
-      }
+      noted(next, "skip", `${p.symbol} quote unavailable. Keeping the paper position open until a fresh mark arrives.`);
       continue;
     }
     const exit = paperExit(p.entry, p.mark, p.sizeUsd, tok.liq);
     const midChg = p.entryMid && p.entryMid > 0 ? ((tok.price / p.entryMid) - 1) * 100 : exit.pct;
     const age = p.openedAt > 0 ? next.now - p.openedAt : 0;
-    const green = exit.pnl > 0;
+    const entryFee = p.entryFee ?? fee(p.sizeUsd);
+    const netPnl = exit.pnl - entryFee;
+    const netPct = p.sizeUsd > 0 ? (netPnl / p.sizeUsd) * 100 : 0;
+    const target = netPct >= next.config.tpPct;
+    const stopped = netPct <= next.config.slPct;
+    const timedOut = age >= MAX_PAPER_HOLD_MS;
     const failed = exit.pnl < 0 && (age >= 4_000 || exit.impact >= 0.04 || midChg <= -0.8);
-    if (!green && !failed) continue;
-    const why = green ? "vitality" : age >= 4_000 ? "no lift" : "scratch";
+    if (!target && !stopped && !timedOut && !failed) continue;
+    const why = target ? "target" : stopped ? "stop" : timedOut ? "time stop" : age >= 4_000 ? "no lift" : "scratch";
     if (p.signature) {
       if (!next.staged.some((s) => s.action === "sell" && s.address === p.address)) {
         next.staged.push({ action: "sell", address: p.address, symbol: p.symbol, why });
@@ -663,20 +646,22 @@ export function applyScan(book: Book, scan: Scan): Book {
 
   const eqMarked = equityOf(next);
   if (eqMarked > next.peak) next.peak = eqMarked;
-  const brake = riskFor(eqMarked).brake;
-  const dd = next.peak > 0 ? (next.peak - eqMarked) / next.peak : 0;
-  if (dd >= brake) {
+  const drawdownUsd = next.peak - eqMarked;
+  if (drawdownUsd >= MAX_SESSION_LOSS_USD) {
     for (const p of [...next.positions]) {
       if (p.signature) continue;
       const tok = byAddr.get(p.address);
-      close(next, p.address, "session brake", tok?.liq ?? 0);
+      if (!tok || !(tok.price > 0)) continue;
+      close(next, p.address, "session brake", tok.liq);
     }
     next.running = false;
     next.halted = true;
     noted(next, "info", `Session brake ${Math.round(dd * 100)}%. Book flattened.`);
   }
 
-  if (next.regime === "down") {
+  if (!(next.sol > 0)) {
+    noted(next, "skip", "SOL reference unavailable. New paper entries are paused.");
+  } else if (next.regime === "down") {
     noted(next, "skip", "SOL is down hard. No scalp.");
   } else if (next.running && !next.halted && !next.staged.some((s) => s.action === "buy")) {
     const ranked: { tok: Token; score: number; reasons: string[] }[] = [];
@@ -689,7 +674,7 @@ export function applyScan(book: Book, scan: Scan): Book {
       if (next.seen.includes(tok.address)) continue;
       if (next.staged.some((s) => s.address === tok.address)) continue;
       const scored = scoreOf(tok, next.config, next.regime, next.learn);
-      const need = next.config.scoreFloor + riskFor(equityOf(next)).floorBump + marketBump(next.regime);
+      const need = next.config.scoreFloor + marketBump(next.regime);
       if (scored.score < need) {
         if (!blockedSeller && scored.reasons.some((reason) => reason.includes("top traders selling"))) blockedSeller = tok.symbol;
         continue;
