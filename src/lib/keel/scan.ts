@@ -83,9 +83,6 @@ async function solTape() {
     solCache = { at: now, tape };
     return tape;
   } catch {
-    if (solCache && now - solCache.at <= 60_000) {
-      return { ...solCache.tape, note: "SOL reference feed degraded; using a cached reference under 60 seconds old." };
-    }
     return { regime: "chop" as Regime, sol: 0, ret1: 0, ret5: 0, sol15: 0, vol1m: 0, note: "SOL reference feed unavailable; new entries are paused." };
   }
 }
