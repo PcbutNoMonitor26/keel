@@ -1,5 +1,5 @@
 import { laneAdjust, featuresOf, type LearnState } from "./learn.ts";
-import { redeployClip, scoreOf, type Config, type Quote, type Regime, type Scan } from "./engine.ts";
+import { scoreOf, type Config, type Quote, type Regime, type Scan } from "./engine.ts";
 import { predict, readingsOf, type Weights } from "./model.ts";
 
 export type AiDecision = "PAPER_ENTRY" | "WATCH" | "REJECT";
@@ -67,16 +67,15 @@ const STOP_PCT = -10;
 const TARGET_PCT = 18;
 const MAX_HOLD_MS = 20 * 60_000;
 const REENTRY_COOLDOWN_MS = 10 * 60_000;
-const RESERVE_PCT = 0.35;
-
-export function emptyAiShadow(startingUsd = 200): AiShadowState {
+export function emptyAiShadow(): AiShadowState {
   return {
     enabled: true,
     mode: "shadow",
-    startingUsd,
-    cash: startingUsd,
+    startingUsd: 0,
+    // cash is realized net P&L only; paper notional remains on positions.
+    cash: 0,
     realized: 0,
-    peak: startingUsd,
+    peak: 0,
     halted: false,
     scans: 0,
     lastAt: 0,
@@ -113,6 +112,7 @@ export function analyzeOpportunity(
   const riskFlags: string[] = [];
   if (baseline.score <= 0) riskFlags.push(...baseline.reasons);
   else if (baseline.score < cfg.scoreFloor) riskFlags.push(`baseline below configured floor (${baseline.score}/${cfg.scoreFloor})`);
+  const effectiveMove = typeof q.shift1m === "number" ? q.shift1m : q.change5m;
   const trench = Boolean(q.pumpFun)
     && q.liq >= 250
     && q.liq < 12_000
@@ -120,20 +120,21 @@ export function analyzeOpportunity(
     && q.buys >= 6
     && q.sells >= 1
     && q.buys > q.sells
-    && q.change5m > -8
-    && q.change5m < 22;
+    && effectiveMove > -8
+    && effectiveMove < 22;
   if (q.liq < 12_000 && !trench) riskFlags.push("liquidity below AI minimum ($12k)");
   if (q.preMigration === true && (q.uniqueTraders ?? 0) < 5) {
     riskFlags.push("pre-migration wallet breadth unverified (<5 unique traders)");
   }
   if (q.buys < 8 || q.sells < 2 || q.buys <= q.sells) riskFlags.push("insufficient verified buy-side flow");
-  if (q.change5m <= -8) riskFlags.push("short-term momentum is deteriorating");
-  if (q.change5m >= 35) riskFlags.push("overheated 5m move / blow-off risk");
+  if (effectiveMove <= -8) riskFlags.push("short-term momentum is deteriorating");
+  if (effectiveMove >= 35) riskFlags.push("overheated short-term move / blow-off risk");
   if (regime === "down") riskFlags.push("SOL market regime is down");
   if (q.topTraderFlow?.signal === "negative") {
     riskFlags.push(`weekly/monthly top-trader cohort is net selling (${q.topTraderFlow.sellAccounts} accounts)`);
   }
-  const costPct = roundTripCost(PAPER_CLIP_USD, q.liq) * 100;
+  const testClip = Math.min(PAPER_CLIP_USD, Math.max(1, Number.isFinite(cfg.buyUsd) ? cfg.buyUsd : PAPER_CLIP_USD));
+  const costPct = roundTripCost(testClip, q.liq) * 100;
   const scalpPct = 4;
   if (!(scalpPct > costPct + 0.4)) riskFlags.push(`round trip ${costPct.toFixed(1)}% eats a ${scalpPct}% scalp`);
 
@@ -190,9 +191,11 @@ export function analyzeOpportunity(
 }
 
 function equityOf(state: AiShadowState): number {
+  // Realized P&L plus estimated net liquidation P&L. No synthetic seed balance.
   return state.cash + state.positions.reduce((sum, p) => {
     const exitHaircut = executionSlippage(p.sizeUsd, p.markLiquidityUsd);
-    return sum + p.sizeUsd * (p.mark / p.entry) * (1 - exitHaircut) * (1 - EXIT_FEE);
+    const proceeds = p.sizeUsd * (p.mark / p.entry) * (1 - exitHaircut) * (1 - EXIT_FEE);
+    return sum + proceeds - p.sizeUsd - p.entryFee;
   }, 0);
 }
 
@@ -213,7 +216,7 @@ function closePosition(state: AiShadowState, p: AiPosition, at: number, reason: 
   const exit = p.mark * (1 - executionSlippage(p.sizeUsd, liquidityUsd));
   const proceeds = p.sizeUsd * (exit / p.entry) * (1 - EXIT_FEE);
   const pnlUsd = proceeds - p.sizeUsd - p.entryFee;
-  state.cash += proceeds;
+  state.cash += pnlUsd;
   state.realized += pnlUsd;
   state.positions = state.positions.filter((item) => item.address !== p.address);
   state.trades.unshift({
@@ -271,8 +274,13 @@ export function advanceAiShadow(
     const age = scan.at - p.openedAt;
     const proceeds = p.sizeUsd * (p.mark / p.entry) * (1 - slip) * (1 - EXIT_FEE);
     const pnl = proceeds - p.sizeUsd - p.entryFee;
-    if (pnl > 0) closePosition(state, p, scan.at, "scalp", quote.liq);
-    else if (pnl < 0 && (age >= 4_000 || slip >= 0.04 || change <= -0.8)) closePosition(state, p, scan.at, age >= 4_000 ? "no lift" : "scratch", quote.liq);
+    const netPct = p.sizeUsd > 0 ? (pnl / p.sizeUsd) * 100 : 0;
+    if (netPct >= TARGET_PCT) closePosition(state, p, scan.at, "target", quote.liq);
+    else if (netPct <= STOP_PCT) closePosition(state, p, scan.at, "stop", quote.liq);
+    else if (age >= MAX_HOLD_MS) closePosition(state, p, scan.at, "time stop", quote.liq);
+    else if (pnl < 0 && (age >= 4_000 || slip >= 0.04 || change <= -0.8)) {
+      closePosition(state, p, scan.at, age >= 4_000 ? "no lift" : "scratch", quote.liq);
+    }
   }
 
   const equity = equityOf(state);
@@ -287,35 +295,25 @@ export function advanceAiShadow(
     state.halted = true;
   }
 
-  const ranked = scan.quotes
+  const ranked = (scan.sol > 0 ? scan.quotes : [])
     .filter((q) => q.price > 0 && !state.positions.some((p) => p.address === q.address) && !recentlyClosed(state, q.address, scan.at))
     .map((q) => ({ ...analyzeOpportunity(q, cfg, scan.regime, learn, weights, scan.ret1), at: scan.at }))
     .sort((a, b) => b.score - a.score);
   const best = ranked[0];
   if (best) recordSignal(state, best);
 
-  const net = equityOf(state) - state.startingUsd;
-  if (!state.halted && net < -1) state.halted = true;
-
   if (!state.halted && best?.decision === "PAPER_ENTRY" && state.positions.length < MAX_POSITIONS) {
     const quote = byAddress.get(best.address);
     if (quote && quote.price > 0) {
-      const markedEquity = equityOf(state);
-      const reserve = markedEquity * RESERVE_PCT;
       const laneSizeMul = learn ? laneAdjust(learn, featuresOf(quote)).sizeMul : 1;
-      const busy = state.positions.length >= 2;
-      if (!(busy && best.score < MIN_SCORE + 8)) {
-      const netNow = markedEquity - state.startingUsd;
-      const base = state.startingUsd < 40 ? Math.min(1, Math.max(0.5, state.startingUsd * 0.2)) : PAPER_CLIP_USD;
-      const clipCap = redeployClip(base, netNow, markedEquity);
-      let clip = Math.min(clipCap * laneSizeMul, Math.max(0, (state.cash - reserve) / (1 + ENTRY_FEE)));
-      if (busy) clip *= 0.5;
-      const minClip = state.startingUsd < 40 ? clipCap : 1;
-      if (clip + 1e-9 >= minClip && state.cash - clip * (1 + ENTRY_FEE) >= reserve - 0.01) {
+      const minClip = Math.max(1, quote.mins > 0 ? quote.mins : 1);
+      const desiredClip = Math.min(PAPER_CLIP_USD, cfg.buyUsd, PAPER_CLIP_USD * laneSizeMul);
+      const clip = Math.min(PAPER_CLIP_USD, Math.max(minClip, desiredClip));
+      if (clip + 1e-9 >= minClip && clip <= PAPER_CLIP_USD) {
         const slip = executionSlippage(clip, quote.liq);
         if (slip + 1e-9 < MAX_EXECUTION_SLIPPAGE) {
           const entryFee = clip * ENTRY_FEE;
-          state.cash -= clip + entryFee;
+          // Paper notional is tracked in the position; cash is the P&L ledger.
           state.positions.push({
             address: quote.address,
             symbol: quote.symbol,
@@ -329,7 +327,6 @@ export function advanceAiShadow(
             features: featuresOf(quote),
           });
         }
-      }
       }
     }
   }
