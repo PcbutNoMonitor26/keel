@@ -48,6 +48,9 @@ type CloseRow = {
   why: string;
   score: number;
   proofLine: string;
+  markSource: "scan" | "stale-position";
+  lastPrintAgeSec: number | null;
+  midChgPct: number | null;
 };
 
 const closes: CloseRow[] = [];
@@ -101,12 +104,15 @@ async function main() {
       }
       for (const pos of closedNow) {
         const tok = book.tokens.find((q) => q.address === pos.address);
-        const mark = tok?.price && tok.price > 0 ? tok.price : pos.mark;
+        const fromScan = Boolean(tok?.price && tok.price > 0);
+        const mark = fromScan ? tok!.price : pos.mark;
         const liq = tok?.liq || pos.markLiquidityUsd || 0;
         const exit = paperExit(pos.entry, mark, pos.sizeUsd, liq);
         const entryFee = pos.entryFee ?? pos.sizeUsd * PAPER_FEE;
         const netUsd = exit.pnl - entryFee;
         const holdMs = book.now && pos.openedAt ? book.now - pos.openedAt : t0 - (pos.openedAt || t0);
+        const bestMid = Math.max(pos.bestMid ?? 0, mark || 0) || pos.bestMid || null;
+        const midChgPct = pos.entryMid && pos.entryMid > 0 && mark > 0 ? ((mark / pos.entryMid) - 1) * 100 : null;
         const row: CloseRow = {
           t: new Date().toISOString(),
           symbol: pos.symbol,
@@ -114,7 +120,7 @@ async function main() {
           lanes: pos.features ?? [],
           entryMid: pos.entryMid ?? null,
           exitMid: mark || null,
-          bestMid: pos.bestMid ?? null,
+          bestMid,
           impactPct: pos.impactPct ?? exit.impact * 100,
           entryFee,
           sizeUsd: pos.sizeUsd,
@@ -126,11 +132,14 @@ async function main() {
           why: whyOf(before.logs, book.logs, pos.symbol),
           score: pos.score,
           proofLine: proofLine(book.learn),
+          markSource: fromScan ? "scan" : "stale-position",
+          lastPrintAgeSec: tok?.lastPrintAgeSec ?? null,
+          midChgPct,
         };
         closes.push(row);
         appendFileSync(jsonlPath, JSON.stringify(row) + "\n");
         console.log(
-          `CLOSE ${row.symbol} ${row.why} lanes=${row.lanes.join(",")} net=${row.netUsd.toFixed(4)} hold=${Math.round(row.holdMs / 1000)}s proof=${row.proofLine}`,
+          `CLOSE ${row.symbol} ${row.why} lanes=${row.lanes.join(",")} net=${row.netUsd.toFixed(4)} hold=${Math.round(row.holdMs / 1000)}s midChg=${row.midChgPct == null ? "n/a" : row.midChgPct.toFixed(2) + "%"} src=${row.markSource} printAge=${row.lastPrintAgeSec == null ? "n/a" : row.lastPrintAgeSec.toFixed(1) + "s"} proof=${row.proofLine}`,
         );
       }
       lastProof = proofLine(book.learn);

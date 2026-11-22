@@ -44,6 +44,7 @@ export type Quote = {
   topTraderFlow?: TopTraderFlow;
   shift1m?: number;
   heat?: number;
+  lastPrintAgeSec?: number;
 };
 
 export type Token = Quote;

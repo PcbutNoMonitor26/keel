@@ -390,6 +390,11 @@ async function pumpFunQuotes(now: number, solUsd: number): Promise<{ quotes: Quo
     if (market) {
       const quote = pairQuote(mint, market, { pumpFun: true, mayhem: launch.mayhem, preMigration: !launch.migrated, ageMin, minutes: ageMin, buys: launch.buys > 0 || launch.sells > 0 ? launch.buys : n(market.txns?.m5?.buys), sells: launch.buys > 0 || launch.sells > 0 ? launch.sells : n(market.txns?.m5?.sells), uniqueTraders: launch.uniqueTraders || undefined });
       if (!quote) return [];
+      const lastPrint = launch.prints?.[launch.prints.length - 1]?.t ?? 0;
+      const live = curvePx(launch.event, solUsd) || (launch.lastPx ?? 0);
+      // DexScreener pairs are cached up to 8s and lag the curve. Use the live mid when a print is fresh.
+      if (live > 0 && lastPrint > 0 && now - lastPrint <= 30_000) quote.price = live;
+      if (lastPrint > 0) quote.lastPrintAgeSec = (now - lastPrint) / 1000;
       const read = tapeRead(launch.prints, now);
       const move = read.shift1m
         ?? (launch.firstPx && launch.lastPx && launch.firstPx > 0 ? ((launch.lastPx / launch.firstPx) - 1) * 100 : 0);
@@ -412,11 +417,13 @@ async function pumpFunQuotes(now: number, solUsd: number): Promise<{ quotes: Quo
     const move = read.shift1m
       ?? (launch.firstPx && launch.lastPx && launch.firstPx > 0 ? ((launch.lastPx / launch.firstPx) - 1) * 100 : 0);
     const traded = ((launch.buySol ?? 0) + (launch.sellSol ?? 0)) * solUsd;
+    const lastPrint = launch.prints?.[launch.prints.length - 1]?.t ?? 0;
     return [{ venue: "sol" as const, address: mint, symbol, title, price, liq: realCurveUsd(event, solUsd),
       vol1h: traded, change1h: 0, change5m: move, buys: launch.buys, sells: launch.sells,
       dex: "pump.fun", side: "long" as const, assetId: "", mins: SOL_MIN_USD, minutes: ageMin,
       edge: 0, fair: 0, endsAt: 0, pumpFun: true, mayhem: launch.mayhem, preMigration: !launch.migrated, ageMin, uniqueTraders: launch.uniqueTraders,
       shift1m: read.shift1m, heat: read.heat,
+      lastPrintAgeSec: lastPrint > 0 ? (now - lastPrint) / 1000 : undefined,
       topTraderFlow: cohortFromTape(walletBook, launch.flow ?? [], now) ?? undefined }];
   });
   quotes.sort((a, b) => (b.buys - b.sells) - (a.buys - a.sells));
@@ -431,17 +438,31 @@ function readHeld(input: unknown): Held[] {
     return validMint(address) ? [{ address }] : [];
   }).slice(0, 8);
 }
-async function heldQuotes(held: Held[], known: Set<string>): Promise<Quote[]> {
-  const missing = held.map(h => h.address).filter(a => !known.has(a));
-  if (!missing.length) return [];
-  const body = await getJson<{ pairs?: Pair[] }>(`https://api.dexscreener.com/latest/dex/tokens/${missing.join(",")}`, 1500);
+async function heldQuotes(held: Held[]): Promise<Quote[]> {
+  const mints = held.map(h => h.address).filter(a => validMint(a));
+  if (!mints.length) return [];
+  const body = await getJson<{ pairs?: Pair[] }>(`https://api.dexscreener.com/latest/dex/tokens/${mints.join(",")}`, 1500);
   const best = new Map<string, Pair>();
   for (const p of body.pairs ?? []) {
     const a = p.baseToken?.address;
-    if (p.chainId !== "solana" || !a || !missing.includes(a)) continue;
+    if (p.chainId !== "solana" || !a || !mints.includes(a)) continue;
     if (!best.has(a) || n(p.liquidity?.usd) > n(best.get(a)?.liquidity?.usd)) best.set(a,p);
   }
-  return missing.flatMap(a => { const p=best.get(a), q=p ? pairQuote(a,p) : null; return q ? [q] : []; });
+  return mints.flatMap(a => { const p=best.get(a), q=p ? pairQuote(a,p) : null; return q ? [q] : []; });
+}
+
+function applyHeldMarks(quotes: Quote[], marks: Quote[]): Quote[] {
+  const byAddress = new Map(quotes.map((quote) => [quote.address, { ...quote }]));
+  for (const mark of marks) {
+    if (!(mark.price > 0)) continue;
+    const prev = byAddress.get(mark.address);
+    if (!prev) {
+      byAddress.set(mark.address, mark);
+      continue;
+    }
+    byAddress.set(mark.address, { ...prev, price: mark.price, liq: mark.liq > 0 ? mark.liq : prev.liq });
+  }
+  return [...byAddress.values()];
 }
 let refreshing = false;
 
@@ -541,11 +562,15 @@ async function buildScan(held: Held[]): Promise<Scan> {
     lead && lead.scored.score > 0 ? `Top candidate: ${lead.q.symbol} score ${lead.scored.score.toFixed(0)} · ${lead.scored.reasons[0] ?? "review gates"}` : "No name is above zero yet. The pump.fun stream is still being watched.",
     processTapeCohort(quotes),
   ];
-  quotes = visible.slice(0, 24);
+  const heldVisible = visible.filter((q) => heldIds.has(q.address));
+  quotes = visible.filter((q) => !heldIds.has(q.address)).slice(0, 24);
+  for (const q of heldVisible) {
+    if (!quotes.some((row) => row.address === q.address)) quotes.push(q);
+  }
   let scan: Scan = { at: now, regime: tape.regime, sol: tape.sol, ret1: tape.ret1, ret5: tape.ret5, sol15: tape.sol15,
     vol1m: tape.vol1m, quotes, process, note: [tape.note].filter(Boolean).join(" ") };
   if (held.length) {
-    try { const marks = await heldQuotes(held,new Set(quotes.map(q=>q.address))); scan={...scan,quotes:[...quotes,...marks]}; }
+    try { const marks = await heldQuotes(held); scan={...scan,quotes:applyHeldMarks(quotes, marks)}; }
     catch { scan={...scan,note:[scan.note,"One or more held-token marks could not be refreshed."].filter(Boolean).join(" ")}; }
   }
   if (held.length === 0) cache = { at: now, scan };
