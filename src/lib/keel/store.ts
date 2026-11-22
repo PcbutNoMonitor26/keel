@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { advanceAiShadow, emptyAiShadow, type AiShadowState } from "@/lib/keel/ai-shadow";
-import { emptyLearn, recordLane, type LearnState } from "@/lib/keel/learn";
+import { emptyLearn, paperProofPassed, proofLine, recordLane, type LearnState } from "@/lib/keel/learn";
 import { persist } from "zustand/middleware";
 import {
   applyScan,
@@ -141,13 +141,33 @@ export const useDesk = create<DeskState>()(
       flattenBook: () => set((s) => flatten(s)),
       reset: () => set(() => ({ ...emptyBook(), aiShadow: emptyAiShadow(), aiLearn: emptyLearn(), hydrated: true, now: Date.now() })),
       arm: () =>
-        set((s) => ({
-          live: false,
-          logs: [
-            { t: s.now || Date.now(), kind: "info" as const, text: "Live trading is disabled while AI shadow validation is in progress. No wallet swaps can be staged." },
-            ...s.logs,
-          ].slice(0, 80),
-        })),
+        set((s) => {
+          const learn = s.learn ?? emptyLearn();
+          if (paperProofPassed(learn)) {
+            return {
+              live: true,
+              logs: [
+                {
+                  t: s.now || Date.now(),
+                  kind: "info" as const,
+                  text: `Paper proof is green (${proofLine(learn)}). Live flag set; Desk still keeps LIVE_TRADING_ENABLED off until the owner writes a separate yes.`,
+                },
+                ...s.logs,
+              ].slice(0, 80),
+            };
+          }
+          return {
+            live: false,
+            logs: [
+              {
+                t: s.now || Date.now(),
+                kind: "info" as const,
+                text: `Live stays off. Paper is ${learn.netUsd > 0 ? "+" : learn.netUsd < 0 ? "-" : ""}$${Math.abs(learn.netUsd).toFixed(2)} after ${learn.n} closes. Need 8 closes, net $ > 0, and profit factor > 1.`,
+              },
+              ...s.logs,
+            ].slice(0, 80),
+          };
+        }),
       disarm: () =>
         set((s) => ({
           live: false,

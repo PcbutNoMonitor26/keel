@@ -103,16 +103,30 @@ export function laneAdjust(state: LearnState, features: string[]): { penalty: nu
   };
 }
 
+export function profitFactor(state: LearnState): number {
+  return state.grossLoss > 0 ? state.grossWin / state.grossLoss : state.grossWin > 0 ? Number.POSITIVE_INFINITY : 0;
+}
+
+export function paperProofPassed(state: LearnState): boolean {
+  const pf = profitFactor(state);
+  return state.n >= 8 && state.netUsd > 0 && pf > 1;
+}
+
+export function formatPaperUsd(usd: number): string {
+  const sign = usd > 0 ? "+" : usd < 0 ? "-" : "";
+  return `${sign}$${Math.abs(usd).toFixed(2)}`;
+}
+
 export function proofLine(state: LearnState): string {
+  const dollars = formatPaperUsd(state.netUsd);
   if (state.n < 8) {
-    return `Paper proof: ${state.n} of 8 closes. Too early to claim an edge. A close is the live mid after impact and 1.25% per-side venue fees, not a backtest.`;
+    return `Paper proof: ${dollars}. ${state.n} of 8 closes. Too early to claim an edge. A close is the live mid after impact and 0.5% per-side venue fees, not a backtest.`;
   }
   const avg = state.sumR / state.n;
-  const pf = state.grossLoss > 0 ? state.grossWin / state.grossLoss : state.grossWin > 0 ? Number.POSITIVE_INFINITY : 0;
+  const pf = profitFactor(state);
   const pfText = pf === Number.POSITIVE_INFINITY ? "no booked loss yet" : pf.toFixed(2);
   const tone = state.netUsd > 0 && pf > 1 ? "ahead of the fee hurdle" : state.netUsd < 0 ? "behind the fee hurdle" : "flat after costs";
-  const sign = state.netUsd > 0 ? "+" : state.netUsd < 0 ? "-" : "";
-  return `Paper proof: ${state.n} closes, ${sign}$${Math.abs(state.netUsd).toFixed(2)} net, expectancy ${avg.toFixed(1)}%, profit factor ${pfText}. ${tone}. This browser's live paper only.`;
+  return `Paper proof: ${dollars} net. ${state.n} closes, expectancy ${avg.toFixed(1)}%, profit factor ${pfText}. ${tone}. This browser's live paper only.`;
 }
 
 export function learnSummary(state: LearnState): string {

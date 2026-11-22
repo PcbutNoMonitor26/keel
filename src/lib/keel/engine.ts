@@ -119,14 +119,16 @@ export const SOL_MIN_USD = 1;
 export const RESERVE = 0.35;
 export const SESSION_BRAKE = 0.04;
 
+export const PAPER_FEE = 0.005;
+
 export const DEFAULT_CONFIG: Config = {
   pollSec: 4,
-  maxPositions: 4,
+  maxPositions: 6,
   buyUsd: 5,
   minLiq: 8_000,
   slPct: -20,
   tpPct: 40,
-  scoreFloor: 62,
+  scoreFloor: 54,
   startingUsd: 200,
   autoSize: true,
 };
@@ -310,7 +312,7 @@ export function scoreOf(
       && q.buys > q.sells
       && move > -8
       && move < 22
-      && q.liq >= 250
+      && q.liq >= 1_400
       && q.liq <= 40_000;
     if (q.liq < 2200 && !trench) return { score: 0, reasons: [`curve ${fmtUsd(q.liq)}`] };
     if (q.liq > 150000) return { score: 0, reasons: ["launch liquidity above discovery range"] };
@@ -403,7 +405,7 @@ export function paperExit(
   const impact = liq > 0 ? impactOf(sizeUsd, liq) : 0.01;
   const exitPx = mark > 0 ? mark * (1 - impact) : 0;
   const gross = entry > 0 ? sizeUsd * (exitPx / entry) : 0;
-  const proceeds = Math.max(0, gross * 0.9875);
+  const proceeds = Math.max(0, gross * (1 - PAPER_FEE));
   const pnl = proceeds - sizeUsd;
   const pct = sizeUsd > 0 ? (pnl / sizeUsd) * 100 : 0;
   return { exitPx, proceeds, pnl, pct, impact };
@@ -414,11 +416,11 @@ export function scalpPays(sizeUsd: number, liq: number): boolean {
   const impact = impactOf(sizeUsd, liq);
   const entry = 1 + impact;
   const exit = paperExit(entry, 1.04, sizeUsd, liq);
-  return exit.pnl - sizeUsd * 0.0125 > 0;
+  return exit.pnl - sizeUsd * PAPER_FEE > 0;
 }
 
 function fee(size: number): number {
-  return size * 0.0125;
+  return size * PAPER_FEE;
 }
 
 function noted(book: Book, kind: LogLine["kind"], text: string) {
@@ -442,7 +444,7 @@ export function planClip(book: Book, tok: Token): { ok: true; clip: number } | {
   if (book.positions.length >= Math.min(book.config.maxPositions, risk.slots)) return { ok: false, error: "book full" };
   const floor = Math.max(risk.minLot, tok.mins > 0 ? tok.mins : SOL_MIN_USD);
   const reserveCash = eq * (eq < 40 ? 0.2 : RESERVE);
-  const budget = Math.max(0, (book.cash - reserveCash) / 1.0125);
+  const budget = Math.max(0, (book.cash - reserveCash) / (1 + PAPER_FEE));
   if (budget + 1e-9 < floor) return { ok: false, error: `${eq < 40 ? 20 : Math.round(RESERVE * 100)}% reserve holds ${fmtUsd(reserveCash)}` };
   const open = book.positions.reduce((s, p) => s + p.sizeUsd, 0);
   const budgeted = stopsFor(eq, book.config).clip;
@@ -517,7 +519,7 @@ export function pinToBook(book: Book, tok: Token): Book {
     return next;
   }
   const reserve = Math.max(0, equityOf(next) * 0.2);
-  const room = Math.max(0, (next.cash - reserve) / 1.0125);
+  const room = Math.max(0, (next.cash - reserve) / (1 + PAPER_FEE));
   const clip = Math.min(5, room);
   if (clip < 1) {
     noted(next, "skip", `${tok.symbol} stays on the tape. Cash is inside the reserve.`);

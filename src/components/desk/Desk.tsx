@@ -415,7 +415,9 @@ export function Desk({ initial }: { initial: Scan }) {
                 </span>
               </div>
             ) : null}
-          <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+            <Stat label="Paper $" value={fmtSigned(book.realized)} hint="closed $ after the 0.5% fee" tone={book.realized} />
+            <Stat label="Session" value={fmtSigned(session)} hint="equity minus starting cash" tone={session} />
             <Stat label="Wallet SOL" value={cover == null ? "$0.00" : fmtUsd(cover)} hint={owner ? "verified SOL, not SPL tokens" : "connect a wallet to read it"} />
             <Stat label="AI paper P&L" value={fmtSigned(aiStats.netPnl)} hint="simulated $5 clips, not wallet funds" tone={aiStats.netPnl} />
             <Stat label="Baseline comparator" value={fmtSigned(session)} hint="virtual book, not your balance" tone={session} />
@@ -434,6 +436,11 @@ export function Desk({ initial }: { initial: Scan }) {
           <LiveProcess tokens={tokens} positions={book.positions} regime={regime} process={process} ago={ago} halted={book.halted} />
         </Panel>
         <Panel className="order-5 lg:order-none lg:col-span-12" title="Paper proof" meta="LIVE MID · NOT A BACKTEST">
+          <div className="mb-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <Stat label="Paper $" value={fmtSigned(book.realized)} hint="closed $ after the 0.5% fee" tone={book.realized} />
+            <Stat label="Session" value={fmtSigned(session)} hint="equity minus starting cash" tone={session} />
+            <Stat label="Closes" value={String((book.learn ?? emptyLearn()).n)} hint="live paper only" />
+          </div>
           <p className="text-sm text-muted">{proofLine(book.learn ?? emptyLearn())}</p>
           <p className="mt-1 text-xs text-faint">{modelLine(book.model)}</p>
           <p className="mt-1 text-xs text-faint">{learnSummary(book.learn ?? emptyLearn())}</p>
