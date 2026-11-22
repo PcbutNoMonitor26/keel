@@ -8,6 +8,7 @@ import { mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { collectScan } from "../src/lib/keel/scan.ts";
 import { applyScan, emptyBook, equityOf, paperExit, PAPER_FEE, type Book, type Position } from "../src/lib/keel/engine.ts";
+import { countMidTick, hasTapePrint } from "../src/lib/keel/marks.ts";
 import { proofLine, profitFactor, type LearnState } from "../src/lib/keel/learn.ts";
 
 function arg(flag: string, fallback: string): string {
@@ -54,6 +55,7 @@ type CloseRow = {
   entrySource: string | null;
   exitSource: string | null;
   midTicks: number;
+  printBacked: boolean;
 };
 
 const closes: CloseRow[] = [];
@@ -101,19 +103,22 @@ async function main() {
       const before = book;
       const open = new Map(before.positions.map((p) => [p.address, p]));
       book = applyScan(before, scan);
+      const still = new Map(book.positions.map((p) => [p.address, p]));
+      for (const [addr, pos] of open) {
+        const current = still.get(addr);
+        const tok = book.tokens.find((q) => q.address === addr);
+        const mid = current
+          ? (current.mark || current.entryMid || 0)
+          : ((tok?.price && tok.price > 0) ? tok.price : (pos.mark || pos.entryMid || 0));
+        midWatch.set(addr, countMidTick(midWatch.get(addr), mid));
+      }
       for (const p of book.positions) {
-        const mid = p.mark || p.entryMid || 0;
-        const prev = midWatch.get(p.address);
-        if (!prev) midWatch.set(p.address, { last: mid, ticks: 0 });
-        else if (mid > 0 && prev.last > 0 && Math.abs(mid / prev.last - 1) > 1e-9) {
-          prev.ticks += 1;
-          prev.last = mid;
-        }
+        if (!midWatch.has(p.address)) midWatch.set(p.address, countMidTick(undefined, p.mark || p.entryMid || 0));
       }
       passes += 1;
       const closedNow: Position[] = [];
       for (const [addr, pos] of open) {
-        if (!book.positions.some((p) => p.address === addr)) closedNow.push(pos);
+        if (!still.has(addr)) closedNow.push(pos);
       }
       for (const pos of closedNow) {
         const tok = book.tokens.find((q) => q.address === pos.address);
@@ -151,12 +156,13 @@ async function main() {
           entrySource: pos.entrySource ?? null,
           exitSource: tok?.priceSource ?? pos.entrySource ?? null,
           midTicks: midWatch.get(pos.address)?.ticks ?? 0,
+          printBacked: tok ? hasTapePrint(tok) : false,
         };
         closes.push(row);
         midWatch.delete(pos.address);
         appendFileSync(jsonlPath, JSON.stringify(row) + "\n");
         console.log(
-          `CLOSE ${row.symbol} ${row.why} lanes=${row.lanes.join(",")} net=${row.netUsd.toFixed(4)} hold=${Math.round(row.holdMs / 1000)}s midChg=${row.midChgPct == null ? "n/a" : row.midChgPct.toFixed(2) + "%"} entrySrc=${row.entrySource ?? "n/a"} exitSrc=${row.exitSource ?? "n/a"} ticks=${row.midTicks} printAge=${row.lastPrintAgeSec == null ? "n/a" : row.lastPrintAgeSec.toFixed(1) + "s"} proof=${row.proofLine}`,
+          `CLOSE ${row.symbol} ${row.why} lanes=${row.lanes.join(",")} net=${row.netUsd.toFixed(4)} hold=${Math.round(row.holdMs / 1000)}s midChg=${row.midChgPct == null ? "n/a" : row.midChgPct.toFixed(2) + "%"} entrySrc=${row.entrySource ?? "n/a"} exitSrc=${row.exitSource ?? "n/a"} ticks=${row.midTicks} print=${row.printBacked} printAge=${row.lastPrintAgeSec == null ? "n/a" : row.lastPrintAgeSec.toFixed(1) + "s"} proof=${row.proofLine}`,
         );
       }
       lastProof = proofLine(book.learn);
