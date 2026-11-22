@@ -55,8 +55,8 @@ export type AiShadowState = {
 };
 
 // Conservative worst-case Pump.fun bonding-curve fee estimate per side.
-const ENTRY_FEE = 0.0125;
-const EXIT_FEE = 0.0125;
+const ENTRY_FEE = 0.005;
+const EXIT_FEE = 0.005;
 const BASE_SLIPPAGE = 0.003;
 const MAX_EXECUTION_SLIPPAGE = 0.08;
 const PAPER_CLIP_USD = 5;

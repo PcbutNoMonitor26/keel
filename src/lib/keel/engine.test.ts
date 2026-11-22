@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
+import { DEFAULT_CONFIG, PAPER_FEE, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
@@ -26,7 +26,7 @@ test("open baseline paper positions are marked at net liquidation value", () => 
   const position = opened.positions[0]!;
   assert.equal(position.markLiquidityUsd, token.liq);
   assert.ok(equityOf(opened) < opened.cash + position.sizeUsd,
-    "open equity must include estimated exit impact and the 1.25% exit fee");
+    "open equity must include estimated exit impact and the 0.5% exit fee");
 });
 
 test("baseline realised PnL and learned outcomes include entry and exit fees", () => {
@@ -51,7 +51,7 @@ test("clip plan respects reserve and position cap", () => {
   const book = emptyBook();
   const plan = planClip(book, token);
   assert.equal(plan.ok, true);
-  if (plan.ok) assert.ok(book.cash - plan.clip - plan.clip * 0.0125 >= book.cash * 0.35 - 0.02);
+  if (plan.ok) assert.ok(book.cash - plan.clip - plan.clip * PAPER_FEE >= book.cash * 0.35 - 0.02);
   const full = { ...book, positions: Array.from({ length: book.config.maxPositions }, (_, i) => ({
     address: String(i), symbol: "X", venue: "sol" as const, side: "long" as const, sizeUsd: 1, entry: 1, mark: 1,
     score: 70, reasons: [], openedAt: 1, endsAt: 0, signature: "", rawOut: "", assetId: "",
@@ -142,9 +142,12 @@ test("logged mayhem losses make the next mayhem score harder", () => {
   assert.equal(emptyLearn().n, 0);
 });
 
-test("baseline paper exit includes the conservative 1.25% venue fee", () => {
+test("baseline paper exit includes the conservative 0.5% venue fee", () => {
   const exit = paperExit(100, 100, 10, 1_000_000);
-  assert.ok(Math.abs(exit.proceeds - 10 * (1 - exit.impact) * 0.9875) < 1e-12);
+  assert.ok(Math.abs(exit.proceeds - 10 * (1 - exit.impact) * (1 - PAPER_FEE)) < 1e-12);
+  assert.equal(PAPER_FEE, 0.005);
+  assert.equal(DEFAULT_CONFIG.scoreFloor, 54);
+  assert.equal(DEFAULT_CONFIG.maxPositions, 6);
 });
 
 test("a paper profit enlarges the next clip without spending the book", () => {
@@ -187,7 +190,10 @@ test("a blank launch is named as having no prints, and a real early curve can be
   const scored = scoreOf({ ...trench, liq: 20_000 }, DEFAULT_CONFIG, "up");
   assert.ok(scored.score >= 65);
   assert.ok(scored.reasons.includes("trench"));
+  // $800 is below the $1,400 floor, the old 1.25% scalpPays boundary for a $5 clip.
+  // The 0.5% fee must not reopen that thinner path.
   assert.equal(scoreOf(trench, DEFAULT_CONFIG, "up").score, 0);
+  assert.equal(scoreOf({ ...trench, liq: 1_200 }, DEFAULT_CONFIG, "up").score, 0);
   assert.equal(scoreOf({ ...trench, change5m: 80 }, DEFAULT_CONFIG, "up").score, 0);
 });
 

@@ -551,3 +551,7 @@ async function buildScan(held: Held[]): Promise<Scan> {
   if (held.length === 0) cache = { at: now, scan };
   return scan;
 }
+
+export async function collectScan(held: Held[] = []): Promise<Scan> {
+  return buildScan(held);
+}
