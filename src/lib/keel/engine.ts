@@ -124,6 +124,9 @@ export const PAPER_FEE = 0.005;
 export const FRESH_PRINT_SEC = 15;
 // 0.4% impact each way plus 1% round-trip fees still leaves room inside a 4% target.
 export const MAX_IMPACT = 0.004;
+// A pump-lane rug can gap past the hard stop between polls. Cap the clip so
+// a total loss is about 1% of book. Score/impact gates still use buyUsd.
+export const PUMP_CLIP_FRAC = 0.01;
 
 export const DEFAULT_CONFIG: Config = {
   pollSec: 4,
@@ -475,6 +478,11 @@ export function planClip(book: Book, tok: Token): { ok: true; clip: number } | {
   const room = Math.min(budget, heatRoom, lossRoom);
   let clip = Math.min(budgeted, room, book.cash);
   if (book.positions.length >= 2) clip *= 0.5;
+  if (featuresOf(tok).includes("pump")) {
+    const cap = eq * PUMP_CLIP_FRAC;
+    if (cap + 1e-9 < floor) return { ok: false, error: "pump clip cap" };
+    clip = Math.min(clip, cap);
+  }
   if (clip < floor) {
     if (room + 1e-9 >= floor) clip = Math.min(floor, room);
     else return { ok: false, error: `min lot ${fmtUsd(floor)}` };

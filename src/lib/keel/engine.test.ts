@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, FRESH_PRINT_SEC, MAX_IMPACT, PAPER_FEE, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
+import { DEFAULT_CONFIG, FRESH_PRINT_SEC, MAX_IMPACT, PAPER_FEE, PUMP_CLIP_FRAC, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
@@ -341,3 +341,31 @@ test("a nonsense SOL print is refused and a real dip is a down day", () => {
   const down = tapeFromCloses([88, 89, 89, 89, 89, 90]);
   assert.equal(down?.regime, "down");
 });
+
+test("a pump-lane clip is capped so one rug is about 1% of book", () => {
+  const book = emptyBook();
+  const pump = {
+    ...token, symbol: "GTA6", dex: "pump.fun", pumpFun: true, ageMin: 4, minutes: 4,
+    liq: 12000, buys: 16, sells: 7, change5m: 8, preMigration: true, uniqueTraders: 8,
+  };
+  const livePlan = planClip(book, token);
+  const pumpPlan = planClip(book, pump);
+  assert.equal(livePlan.ok, true);
+  assert.equal(pumpPlan.ok, true);
+  if (livePlan.ok) assert.ok(livePlan.clip > book.cash * PUMP_CLIP_FRAC, "live clips stay on the existing size path");
+  if (pumpPlan.ok) {
+    const cap = equityOf(book) * PUMP_CLIP_FRAC;
+    assert.ok(pumpPlan.clip <= cap + 1e-9);
+    const wiped = paperExit(1, 0.18, pumpPlan.clip, pump.liq);
+    const entryFee = pumpPlan.clip * PAPER_FEE;
+    assert.ok(-(wiped.pnl - entryFee) <= equityOf(book) * 0.01 + entryFee + 1e-6);
+  }
+  const tiny = emptyBook();
+  tiny.cash = 50;
+  tiny.peak = 50;
+  tiny.config = { ...tiny.config, startingUsd: 50 };
+  const refused = planClip(tiny, pump);
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.error, "pump clip cap");
+});
+
