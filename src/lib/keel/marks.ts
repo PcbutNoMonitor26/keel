@@ -81,7 +81,7 @@ export function applySameSourceMarks(quotes: Quote[], marks: MidMark[]): Quote[]
       if ("venue" in mark && (mark as Quote).venue) byAddress.set(mark.address, { ...(mark as Quote) });
       continue;
     }
-    if (prev.priceSource && mark.priceSource && prev.priceSource !== mark.priceSource) continue;
+    if (prev.priceSource && mark.priceSource && prev.priceSource !== mark.priceSource && !allowsLiveCurveOverlay(prev.priceSource, mark.priceSource)) continue;
     byAddress.set(mark.address, {
       ...prev,
       price: mark.price,
@@ -102,4 +102,20 @@ export function heldSourceOf(
   if (quote?.priceSource === "curve" || quote?.priceSource === "gecko" || quote?.priceSource === "dex") return quote.priceSource;
   if (onCurve) return "curve";
   return undefined;
+}
+
+/** Live pump prints / curve state may overlay a gecko (or dex) entry mid. Dex may not overlay either. */
+export function allowsLiveCurveOverlay(prev?: PriceSource, mark?: PriceSource): boolean {
+  return mark === "curve" && prev !== "curve";
+}
+
+export function hasTapePrint(tok: { lastPrintAgeSec?: number }): boolean {
+  return typeof tok.lastPrintAgeSec === "number" && Number.isFinite(tok.lastPrintAgeSec);
+}
+
+/** Count a mid change, including the poll that closes the hold. */
+export function countMidTick(prev: { last: number; ticks: number } | undefined, mid: number): { last: number; ticks: number } {
+  if (!prev) return { last: mid > 0 ? mid : 0, ticks: 0 };
+  if (mid > 0 && prev.last > 0 && Math.abs(mid / prev.last - 1) > 1e-9) return { last: mid, ticks: prev.ticks + 1 };
+  return { last: prev.last, ticks: prev.ticks };
 }

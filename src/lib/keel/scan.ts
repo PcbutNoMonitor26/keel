@@ -189,17 +189,25 @@ function settleWallets(now: number) {
     }
   }
 }
+const heldWatch = new Set<string>();
 function watchMint(socket: WebSocket, mint: string) {
   if (socket.readyState !== WebSocket.OPEN || watchedMints.has(mint)) return;
-  watchedMints.add(mint);
-  if (watchedMints.size > 80) {
-    const drop = watchedMints.values().next().value;
-    if (drop) {
-      watchedMints.delete(drop);
-      socket.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [drop] }));
-    }
+  if (watchedMints.size >= 80) {
+    const drop = [...watchedMints].find((m) => !heldWatch.has(m));
+    if (!drop) return;
+    watchedMints.delete(drop);
+    socket.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [drop] }));
   }
+  watchedMints.add(mint);
   socket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+}
+function watchHeldMints(held: Held[]) {
+  heldWatch.clear();
+  for (const row of held) {
+    if (!validMint(row.address)) continue;
+    heldWatch.add(row.address);
+    if (pumpSocket?.readyState === WebSocket.OPEN) watchMint(pumpSocket, row.address);
+  }
 }
 function ensurePumpStream(now: number) {
   if (typeof WebSocket === "undefined") {
@@ -228,6 +236,7 @@ function ensurePumpStream(now: number) {
       socket.send(JSON.stringify({ method: "subscribeNewToken" }));
       socket.send(JSON.stringify({ method: "subscribeMigration" }));
       for (const mint of pumpLaunches.keys()) watchMint(socket, mint);
+      for (const mint of heldWatch) watchMint(socket, mint);
       pumpStatus = "Pump.fun launch, trade, and migration stream connected.";
     });
     socket.addEventListener("message", (message) => {
@@ -503,7 +512,11 @@ function heldBuckets(held: Held[], quotes: Quote[]): { curve: Held[]; gecko: Hel
   const gecko: Held[] = [];
   const dex: Held[] = [];
   for (const row of held) {
-    const src = heldSourceOf(row, byAddr.get(row.address), pumpLaunches.has(row.address));
+    if (pumpLaunches.has(row.address)) {
+      curve.push(row);
+      continue;
+    }
+    const src = heldSourceOf(row, byAddr.get(row.address), false);
     if (src === "curve") curve.push(row);
     else if (src === "gecko") gecko.push(row);
     else dex.push(row);
@@ -621,6 +634,7 @@ async function buildScan(held: Held[]): Promise<Scan> {
   let scan: Scan = { at: now, regime: tape.regime, sol: tape.sol, ret1: tape.ret1, ret5: tape.ret5, sol15: tape.sol15,
     vol1m: tape.vol1m, quotes, process, note: [tape.note].filter(Boolean).join(" ") };
   if (held.length) {
+    watchHeldMints(held);
     try {
       const buckets = heldBuckets(held, quotes);
       const marks: Quote[] = [...curveHeldMarks(buckets.curve, tape.sol, now)];

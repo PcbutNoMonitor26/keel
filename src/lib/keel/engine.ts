@@ -1,4 +1,5 @@
 import { emptyLearn, featuresOf, laneAdjust, recordOutcome, type LearnState } from "./learn.ts";
+import { hasTapePrint } from "./marks.ts";
 import { emptyModel, modelAllows, noteSample, readingsOf, type ModelMemory } from "./model.ts";
 import type { TopTraderFlow } from "./trader-intel.ts";
 
@@ -141,6 +142,17 @@ export function keepScanPriceOverDex(
 ): boolean {
   if (!(prev.price > 0) || !prev.priceSource || prev.priceSource === "dex") return false;
   return (mark.priceSource ?? "dex") === "dex";
+}
+
+export function shouldReanchorMark(
+  pos: { entrySource?: PriceSource; entryMid?: number; sourceAnchored?: boolean },
+  tok: { price: number; priceSource?: PriceSource; lastPrintAgeSec?: number },
+): boolean {
+  if (!(tok.price > 0) || pos.sourceAnchored) return false;
+  if (pos.entrySource && tok.priceSource && tok.priceSource !== pos.entrySource) return true;
+  const midMoved = Boolean(pos.entryMid && pos.entryMid > 0 && Math.abs(tok.price / pos.entryMid - 1) > 1e-9);
+  // A first gecko HTTP mid jump with no tape print is a cache catch-up, not vitality or a scratch.
+  return midMoved && tok.priceSource === "gecko" && !hasTapePrint(tok);
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -675,16 +687,13 @@ export function applyScan(book: Book, scan: Scan): Book {
     const tok = byAddr.get(p.address);
     if (tok && tok.price > 0) {
       if (
-        p.entrySource
-        && tok.priceSource
-        && tok.priceSource !== p.entrySource
-        && !p.sourceAnchored
+        shouldReanchorMark(p, tok)
       ) {
         const slip = impactOf(p.sizeUsd, tok.liq || p.markLiquidityUsd || 0);
         p.entryMid = tok.price;
         p.entry = tok.price * (1 + slip);
         p.impactPct = slip * 100;
-        p.entrySource = tok.priceSource;
+        if (tok.priceSource) p.entrySource = tok.priceSource;
         p.sourceAnchored = true;
         p.bestMid = tok.price;
       }

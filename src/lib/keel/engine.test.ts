@@ -394,7 +394,7 @@ test("a first mark from a different venue re-anchors instead of scratching", () 
 });
 
 test("a same-source mid drop still scratches immediately", () => {
-  const live = { ...token, symbol: "MEME", price: 1.5e-5, priceSource: "gecko" as const };
+  const live = { ...token, symbol: "MEME", price: 1.5e-5, priceSource: "curve" as const, lastPrintAgeSec: 0.4 };
   const opened = applyScan(emptyBook(), {
     at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
     quotes: [live], process: [], note: "",
@@ -402,9 +402,76 @@ test("a same-source mid drop still scratches immediately", () => {
   assert.equal(opened.positions.length, 1);
   const dropped = applyScan(opened, {
     at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
-    quotes: [{ ...live, price: live.price * 0.93 }], process: [], note: "",
+    quotes: [{ ...live, price: live.price * 0.93, lastPrintAgeSec: 0.2 }], process: [], note: "",
   });
   assert.equal(dropped.positions.length, 0);
+});
+
+test("a first unprinted gecko mid jump re-anchors instead of scratching or taking profit", () => {
+  const live = { ...token, symbol: "MEME", price: 1.5e-5, priceSource: "gecko" as const };
+  const opened = applyScan(emptyBook(), {
+    at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [live], process: [], note: "",
+  });
+  assert.equal(opened.positions.length, 1);
+  const dump = applyScan(opened, {
+    at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [{ ...live, price: live.price * 0.93 }], process: [], note: "",
+  });
+  assert.equal(dump.positions.length, 1, "an unprinted gecko drop is not a scratch");
+  assert.equal(dump.positions[0]?.sourceAnchored, true);
+  assert.equal(dump.positions[0]?.entryMid, live.price * 0.93);
+  assert.equal(dump.positions[0]?.entrySource, "gecko");
+  const pump = applyScan(opened, {
+    at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [{ ...live, price: live.price * 1.35 }], process: [], note: "",
+  });
+  assert.equal(pump.positions.length, 1, "an unprinted gecko jump is not vitality");
+  assert.equal(pump.positions[0]?.sourceAnchored, true);
+  assert.equal(pump.positions[0]?.entryMid, live.price * 1.35);
+});
+
+test("a confirmed print drop still scratches after a gecko re-anchor", () => {
+  const live = { ...token, symbol: "MEME", price: 1.5e-5, priceSource: "gecko" as const };
+  const opened = applyScan(emptyBook(), {
+    at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [live], process: [], note: "",
+  });
+  const anchored = applyScan(opened, {
+    at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [{ ...live, price: live.price * 0.99 }], process: [], note: "",
+  });
+  assert.equal(anchored.positions.length, 1);
+  const printed = applyScan(anchored, {
+    at: 4_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [{ ...live, price: live.price * 0.99 * 0.93, priceSource: "curve", lastPrintAgeSec: 0.3 }], process: [], note: "",
+  });
+  // First curve mark is a source switch, so it re-anchors if not already anchored.
+  // Already sourceAnchored from the gecko jump, so a printed 7% drop must scratch.
+  assert.equal(printed.positions.length, 0, "a confirmed print drop still scratches");
+});
+
+test("a gecko entry marked from a live curve re-anchors, then a printed 6% dump still scratches", () => {
+  const gecko = { ...token, symbol: "HYPE", price: 3.48e-5, priceSource: "gecko" as const };
+  const opened = applyScan(emptyBook(), {
+    at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [gecko], process: [], note: "",
+  });
+  assert.equal(opened.positions.length, 1);
+  const curve = { ...gecko, price: gecko.price * 0.97, priceSource: "curve" as const, lastPrintAgeSec: 0.2, pumpFun: true, dex: "pump.fun" };
+  const marked = applyScan(opened, {
+    at: 3_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [curve], process: [], note: "",
+  });
+  assert.equal(marked.positions.length, 1, "first curve mark after a gecko entry re-anchors");
+  assert.equal(marked.positions[0]?.sourceAnchored, true);
+  assert.equal(marked.positions[0]?.entrySource, "curve");
+  assert.equal(marked.positions[0]?.entryMid, curve.price);
+  const dumped = applyScan(marked, {
+    at: 5_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [{ ...curve, price: curve.price * 0.93, lastPrintAgeSec: 0.1 }], process: [], note: "",
+  });
+  assert.equal(dumped.positions.length, 0, "a confirmed print down 6%+ still scratches");
 });
 
 test("a fresh curve mid is not replaced by a DexScreener mark", () => {

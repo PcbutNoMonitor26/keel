@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applySameSourceMarks, curveHeldMid, heldSourceOf, parseGeckoTokenPrices } from "./marks.ts";
+import { allowsLiveCurveOverlay, applySameSourceMarks, countMidTick, curveHeldMid, hasTapePrint, heldSourceOf, parseGeckoTokenPrices } from "./marks.ts";
 import type { Quote } from "./engine.ts";
 
 const base: Quote = {
@@ -64,4 +64,28 @@ test("held source prefers the entry tag, then the quote, then a live curve", () 
   assert.equal(heldSourceOf({ address: "x" }, { priceSource: "curve" }, false), "curve");
   assert.equal(heldSourceOf({ address: "x" }, {}, true), "curve");
   assert.equal(heldSourceOf({ address: "x" }, {}, false), undefined);
+});
+
+test("a live curve mark overlays a gecko entry mid and a DexScreener mark does not", () => {
+  const quoted = [{ ...base, price: 1.48e-5, priceSource: "gecko" as const }];
+  const curved = applySameSourceMarks(quoted, [{ address: base.address, price: 1.51e-5, priceSource: "curve", lastPrintAgeSec: 0.3 }]);
+  assert.equal(curved[0]?.price, 1.51e-5);
+  assert.equal(curved[0]?.priceSource, "curve");
+  assert.equal(curved[0]?.lastPrintAgeSec, 0.3);
+  const crossed = applySameSourceMarks(quoted, [{ address: base.address, price: 1.35e-5, priceSource: "dex" }]);
+  assert.equal(crossed[0]?.price, 1.48e-5);
+  assert.equal(crossed[0]?.priceSource, "gecko");
+  assert.equal(allowsLiveCurveOverlay("gecko", "curve"), true);
+  assert.equal(allowsLiveCurveOverlay("curve", "dex"), false);
+});
+
+test("countMidTick includes the exit poll", () => {
+  const opened = countMidTick(undefined, 1.5e-5);
+  assert.equal(opened.ticks, 0);
+  const held = countMidTick(opened, 1.5e-5);
+  assert.equal(held.ticks, 0);
+  const closed = countMidTick(held, 1.5e-5 * 1.35);
+  assert.equal(closed.ticks, 1);
+  assert.equal(hasTapePrint({ lastPrintAgeSec: 0.4 }), true);
+  assert.equal(hasTapePrint({}), false);
 });
