@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import pg from "pg";
-import { SOL_MIN_USD, scoreOf, tapeFromCloses, DEFAULT_CONFIG, type Quote, type Regime, type Scan } from "@/lib/keel/engine";
+import { SOL_MIN_USD, scoreOf, tapeFromCloses, DEFAULT_CONFIG, keepScanPriceOverDex, type Quote, type Regime, type Scan } from "@/lib/keel/engine";
 import { cohortFromTape, settleTape, type TapePrint } from "@/lib/keel/trader-intel";
 
 const UA = "Keel/1.0";
@@ -300,7 +300,7 @@ function pairQuote(address: string, p: Pair, extra: Partial<Quote> = {}): Quote 
   return { venue: "sol", address, symbol: p.baseToken?.symbol || "?", title: p.baseToken?.name || "", price,
     liq, vol1h: n(p.volume?.h1), change1h: n(p.priceChange?.h1), change5m: n(p.priceChange?.m5),
     buys: n(p.txns?.m5?.buys), sells: n(p.txns?.m5?.sells),
-    dex: p.dexId || "dex", side: "long", assetId: "", mins: SOL_MIN_USD, minutes: 0, edge: 0, fair: 0, endsAt: 0, ...extra };
+    dex: p.dexId || "dex", side: "long", assetId: "", mins: SOL_MIN_USD, minutes: 0, edge: 0, fair: 0, endsAt: 0, priceSource: "dex", ...extra };
 }
 async function persistedPumpLaunches(): Promise<{ launches: [string, PumpLaunch][]; status: string }> {
   if (!feedPool) return { launches: [], status: "" };
@@ -393,7 +393,10 @@ async function pumpFunQuotes(now: number, solUsd: number): Promise<{ quotes: Quo
       const lastPrint = launch.prints?.[launch.prints.length - 1]?.t ?? 0;
       const live = curvePx(launch.event, solUsd) || (launch.lastPx ?? 0);
       // DexScreener pairs are cached up to 8s and lag the curve. Use the live mid when a print is fresh.
-      if (live > 0 && lastPrint > 0 && now - lastPrint <= 30_000) quote.price = live;
+      if (live > 0 && lastPrint > 0 && now - lastPrint <= 30_000) {
+        quote.price = live;
+        quote.priceSource = "curve";
+      }
       if (lastPrint > 0) quote.lastPrintAgeSec = (now - lastPrint) / 1000;
       const read = tapeRead(launch.prints, now);
       const move = read.shift1m
@@ -424,6 +427,7 @@ async function pumpFunQuotes(now: number, solUsd: number): Promise<{ quotes: Quo
       edge: 0, fair: 0, endsAt: 0, pumpFun: true, mayhem: launch.mayhem, preMigration: !launch.migrated, ageMin, uniqueTraders: launch.uniqueTraders,
       shift1m: read.shift1m, heat: read.heat,
       lastPrintAgeSec: lastPrint > 0 ? (now - lastPrint) / 1000 : undefined,
+      priceSource: "curve",
       topTraderFlow: cohortFromTape(walletBook, launch.flow ?? [], now) ?? undefined }];
   });
   quotes.sort((a, b) => (b.buys - b.sells) - (a.buys - a.sells));
@@ -460,7 +464,11 @@ function applyHeldMarks(quotes: Quote[], marks: Quote[]): Quote[] {
       byAddress.set(mark.address, mark);
       continue;
     }
-    byAddress.set(mark.address, { ...prev, price: mark.price, liq: mark.liq > 0 ? mark.liq : prev.liq });
+    if (keepScanPriceOverDex(prev, mark)) {
+      byAddress.set(mark.address, { ...prev, liq: mark.liq > 0 ? mark.liq : prev.liq });
+      continue;
+    }
+    byAddress.set(mark.address, { ...prev, price: mark.price, liq: mark.liq > 0 ? mark.liq : prev.liq, priceSource: mark.priceSource ?? "dex" });
   }
   return [...byAddress.values()];
 }
@@ -512,6 +520,7 @@ async function geckoLiveQuotes(now: number): Promise<{ quotes: Quote[]; note: st
         dex: dexId, side: "long", assetId: "", mins: SOL_MIN_USD, minutes: ageMin, edge: 0, fair: 0, endsAt: 0,
         pumpFun, mayhem: Boolean(stream?.mayhem), preMigration: stream ? !stream.migrated : false,
         ageMin, uniqueTraders: n(tx.m5?.buyers) || stream?.uniqueTraders || undefined,
+        priceSource: "gecko",
       });
     }
     const value = { quotes: quotes.filter((q) => q.price > 0).slice(0, 20), note: `GeckoTerminal: ${quotes.length} new Solana pools.` };
@@ -532,12 +541,16 @@ function mergeQuotes(primary: Quote[], extra: Quote[]): Quote[] {
       continue;
     }
     const richer = quote.buys + quote.sells >= prev.buys + prev.sells ? quote : prev;
+    const curve = [quote, prev].find((q) => q.priceSource === "curve" && typeof q.lastPrintAgeSec === "number" && q.lastPrintAgeSec <= 30 && q.price > 0);
     byAddress.set(quote.address, {
       ...richer,
       mayhem: Boolean(quote.mayhem || prev.mayhem),
       pumpFun: Boolean(quote.pumpFun || prev.pumpFun),
       uniqueTraders: richer.uniqueTraders || quote.uniqueTraders || prev.uniqueTraders,
       liq: Math.max(quote.liq, prev.liq),
+      lastPrintAgeSec: quote.lastPrintAgeSec ?? prev.lastPrintAgeSec,
+      priceSource: curve?.priceSource ?? richer.priceSource ?? quote.priceSource ?? prev.priceSource,
+      ...(curve ? { price: curve.price } : {}),
     });
   }
   return [...byAddress.values()].filter((q) => q.price > 0);

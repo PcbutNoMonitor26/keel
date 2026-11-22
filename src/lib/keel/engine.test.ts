@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, FRESH_PRINT_SEC, MAX_IMPACT, PAPER_FEE, PUMP_CLIP_FRAC, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
+import { DEFAULT_CONFIG, FRESH_PRINT_SEC, MAX_IMPACT, PAPER_FEE, PUMP_CLIP_FRAC, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses, keepScanPriceOverDex } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
@@ -367,5 +367,50 @@ test("a pump-lane clip is capped so one rug is about 1% of book", () => {
   const refused = planClip(tiny, pump);
   assert.equal(refused.ok, false);
   if (!refused.ok) assert.equal(refused.error, "pump clip cap");
+});
+
+test("a first mark from a different venue re-anchors instead of scratching", () => {
+  const live = { ...token, symbol: "MEME", price: 1.4837374893369056e-5, priceSource: "gecko" as const };
+  const opened = applyScan(emptyBook(), {
+    at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [live], process: [], note: "",
+  });
+  assert.equal(opened.positions.length, 1);
+  assert.equal(opened.positions[0]?.entrySource, "gecko");
+  const dex = { ...live, price: live.price * 0.93, priceSource: "dex" as const };
+  const marked = applyScan(opened, {
+    at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [dex], process: [], note: "",
+  });
+  assert.equal(marked.positions.length, 1, "a gecko-to-dex basis gap is not a dump");
+  assert.equal(marked.positions[0]?.sourceAnchored, true);
+  assert.equal(marked.positions[0]?.entrySource, "dex");
+  assert.equal(marked.positions[0]?.entryMid, dex.price);
+  const later = applyScan(marked, {
+    at: 4_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [{ ...dex, price: dex.price * 0.98 }], process: [], note: "",
+  });
+  assert.equal(later.positions.length, 0, "a later same-source drop still scratches");
+});
+
+test("a same-source mid drop still scratches immediately", () => {
+  const live = { ...token, symbol: "MEME", price: 1.5e-5, priceSource: "gecko" as const };
+  const opened = applyScan(emptyBook(), {
+    at: 1_000, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [live], process: [], note: "",
+  });
+  assert.equal(opened.positions.length, 1);
+  const dropped = applyScan(opened, {
+    at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
+    quotes: [{ ...live, price: live.price * 0.93 }], process: [], note: "",
+  });
+  assert.equal(dropped.positions.length, 0);
+});
+
+test("a fresh curve mid is not replaced by a DexScreener mark", () => {
+  assert.equal(keepScanPriceOverDex({ price: 7.314736615855998e-6, priceSource: "curve" }, { priceSource: "dex" }), true);
+  assert.equal(keepScanPriceOverDex({ price: 1.48e-5, priceSource: "gecko" }, { priceSource: "dex" }), true);
+  assert.equal(keepScanPriceOverDex({ price: 1.45e-5, priceSource: "dex" }, { priceSource: "dex" }), false);
+  assert.equal(keepScanPriceOverDex({ price: 1, priceSource: "curve" }, { priceSource: "curve" }), false);
 });
 

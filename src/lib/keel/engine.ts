@@ -45,7 +45,10 @@ export type Quote = {
   shift1m?: number;
   heat?: number;
   lastPrintAgeSec?: number;
+  priceSource?: PriceSource;
 };
+
+export type PriceSource = "curve" | "dex" | "gecko";
 
 export type Token = Quote;
 
@@ -71,6 +74,8 @@ export type Position = {
   entryFee?: number;
   features?: string[];
   readings?: number[];
+  entrySource?: PriceSource;
+  sourceAnchored?: boolean;
 };
 
 export type LogLine = { t: number; kind: "info" | "skip" | "buy" | "sell"; text: string };
@@ -127,6 +132,16 @@ export const MAX_IMPACT = 0.004;
 // A pump-lane rug can gap past the hard stop between polls. Cap the clip so
 // a total loss is about 1% of book. Score/impact gates still use buyUsd.
 export const PUMP_CLIP_FRAC = 0.01;
+
+// DexScreener marks are rounded and can lag the curve/Gecko mid used at entry.
+// Keep the scan mid when a dex refresh would swap venues.
+export function keepScanPriceOverDex(
+  prev: { price: number; priceSource?: PriceSource },
+  mark: { priceSource?: PriceSource },
+): boolean {
+  if (!(prev.price > 0) || !prev.priceSource || prev.priceSource === "dex") return false;
+  return (mark.priceSource ?? "dex") === "dex";
+}
 
 export const DEFAULT_CONFIG: Config = {
   pollSec: 4,
@@ -580,6 +595,7 @@ export function pinToBook(book: Book, tok: Token): Book {
     entryFee,
     features: featuresOf(tok),
     readings: readingsOf(tok, next.ret1, clip),
+    entrySource: tok.priceSource,
   });
   noted(next, "buy", `${tok.symbol} is in the book. It stays until you close it, or the mark turns green or fades.`);
   return next;
@@ -621,6 +637,7 @@ function tryBuy(book: Book, tok: Token, score: number, reasons: string[]) {
     entryFee,
     features: featuresOf(tok),
     readings: readingsOf(tok, book.ret1, clip),
+    entrySource: tok.priceSource,
   });
   if (!book.seen.includes(tok.address)) book.seen.push(tok.address);
   noted(book, "buy", `${tok.symbol} ${fmtUsd(clip)} · ${score.toFixed(0)} · ${reasons.slice(0, 3).join(", ")}`);
@@ -657,6 +674,20 @@ export function applyScan(book: Book, scan: Scan): Book {
   for (const p of next.positions) {
     const tok = byAddr.get(p.address);
     if (tok && tok.price > 0) {
+      if (
+        p.entrySource
+        && tok.priceSource
+        && tok.priceSource !== p.entrySource
+        && !p.sourceAnchored
+      ) {
+        const slip = impactOf(p.sizeUsd, tok.liq || p.markLiquidityUsd || 0);
+        p.entryMid = tok.price;
+        p.entry = tok.price * (1 + slip);
+        p.impactPct = slip * 100;
+        p.entrySource = tok.priceSource;
+        p.sourceAnchored = true;
+        p.bestMid = tok.price;
+      }
       p.mark = tok.price;
       p.markLiquidityUsd = tok.liq;
       p.bestMid = Math.max(p.bestMid ?? tok.price, tok.price);
