@@ -653,9 +653,15 @@ export function applyScan(book: Book, scan: Scan): Book {
     const midChg = p.entryMid && p.entryMid > 0 ? ((tok.price / p.entryMid) - 1) * 100 : exit.pct;
     const age = p.openedAt > 0 ? next.now - p.openedAt : 0;
     const green = exit.pnl > 0;
-    const failed = exit.pnl < 0 && (age >= 4_000 || exit.impact >= 0.04 || midChg <= -0.8);
+    const dumped = midChg <= -0.8;
+    const stuckThin = exit.impact >= 0.04;
+    const midMoved = p.entryMid && p.entryMid > 0 && Math.abs(tok.price / p.entryMid - 1) > 1e-9;
+    // A 4s scratch on an unchanged mid is just the fee. Wait for a later print, or 20s.
+    const noMidLift = age >= 4_000 && midMoved && midChg <= 0;
+    const feeTimeout = age >= 20_000 && exit.pnl < 0;
+    const failed = exit.pnl < 0 && (dumped || stuckThin || noMidLift || feeTimeout);
     if (!green && !failed) continue;
-    const why = green ? "vitality" : age >= 4_000 ? "no lift" : "scratch";
+    const why = green ? "vitality" : dumped ? "scratch" : noMidLift || feeTimeout ? "no lift" : "scratch";
     if (p.signature) {
       if (!next.staged.some((s) => s.action === "sell" && s.address === p.address)) {
         next.staged.push({ action: "sell", address: p.address, symbol: p.symbol, why });

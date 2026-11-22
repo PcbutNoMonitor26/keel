@@ -228,23 +228,59 @@ test("the last minute can kill a name the longer move still likes", () => {
   assert.equal(scoreOf({ ...hot, heat: 0.2 }, DEFAULT_CONFIG, "up").score, 0);
 });
 
-test("a red clip is sold once it has had four seconds and the host stays on", () => {
+function pinned(mark: number, openedAt: number) {
+  return {
+    address: token.address, symbol: "FNUT", venue: "sol" as const, side: "long" as const, sizeUsd: 5, entry: 1, mark,
+    score: 70, reasons: ["pinned"], openedAt, endsAt: 0, signature: "", rawOut: "", assetId: "",
+    entryMid: 1, markLiquidityUsd: 50_000,
+  };
+}
+
+test("a red clip on an unchanged mid is not fee-scratched at four seconds", () => {
   const book = emptyBook();
   book.running = true;
   book.realized = -1.59;
   book.cash = 198;
-  book.positions = [{
-    address: token.address, symbol: "FNUT", venue: "sol", side: "long", sizeUsd: 5, entry: 1, mark: 1,
-    score: 70, reasons: ["pinned"], openedAt: 1_000, endsAt: 0, signature: "", rawOut: "", assetId: "",
-    entryMid: 1, markLiquidityUsd: 400,
-  }];
+  book.positions = [pinned(1, 1_000)];
+  const still = applyScan(book, {
+    at: 6_000, regime: "chop", sol: 89, ret1: 0, ret5: 0, sol15: 0, vol1m: 0.2,
+    quotes: [{ ...token, symbol: "FNUT", price: 1, liq: 50_000 }], process: [], note: "",
+  });
+  assert.equal(still.positions.length, 1, "stale mid at 5s is not a no-lift");
+  assert.equal(still.running, true);
+  const later = applyScan(still, {
+    at: 22_000, regime: "chop", sol: 89, ret1: 0, ret5: 0, sol15: 0, vol1m: 0.2,
+    quotes: [{ ...token, symbol: "FNUT", price: 1, liq: 50_000 }], process: [], note: "",
+  });
+  assert.equal(later.positions.length, 0, "unchanged mid still exits after 20s");
+  assert.equal(later.running, true);
+  assert.equal(later.halted, false);
+});
+
+test("a mid that has actually dropped is sold on the next pass", () => {
+  const book = emptyBook();
+  book.running = true;
+  book.cash = 198;
+  book.positions = [pinned(1, 1_000)];
   const next = applyScan(book, {
     at: 6_000, regime: "chop", sol: 89, ret1: 0, ret5: 0, sol15: 0, vol1m: 0.2,
-    quotes: [{ ...token, symbol: "FNUT", price: 1, liq: 400 }], process: [], note: "",
+    quotes: [{ ...token, symbol: "FNUT", price: 0.99, liq: 50_000 }], process: [], note: "",
   });
   assert.equal(next.positions.length, 0);
-  assert.equal(next.running, true);
-  assert.equal(next.halted, false);
+});
+
+test("a mid that is up but still fee-red is held past four seconds", () => {
+  const book = emptyBook();
+  book.running = true;
+  book.cash = 198;
+  book.positions = [pinned(1, 1_000)];
+  const next = applyScan(book, {
+    at: 6_000, regime: "chop", sol: 89, ret1: 0, ret5: 0, sol15: 0, vol1m: 0.2,
+    quotes: [{ ...token, symbol: "FNUT", price: 1.003, liq: 50_000 }], process: [], note: "",
+  });
+  assert.equal(next.positions.length, 1);
+  const exit = paperExit(1, 1.003, 5, 50_000);
+  assert.ok(exit.pnl - 5 * PAPER_FEE < 0, "precondition: 0.3% mid lift does not clear the 0.5% fee");
 });
 
 test("a chased pump or live tape of 18% or more is refused", () => {
