@@ -6,7 +6,7 @@
  */
 import { mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { collectScan } from "../src/lib/keel/scan.ts";
+import { collectScan, pumpIntakeSnapshot } from "../src/lib/keel/scan.ts";
 import { applyScan, emptyBook, equityOf, paperExit, PAPER_FEE, quietTape, type Book, type Position } from "../src/lib/keel/engine.ts";
 import { countMidTick, hasTapePrint } from "../src/lib/keel/marks.ts";
 import { proofLine, profitFactor, type LearnState } from "../src/lib/keel/learn.ts";
@@ -99,12 +99,23 @@ async function main() {
   const refusedMissing = new Set<string>();
   const refusedStale = new Set<string>();
   const entriesTaken = new Set<string>();
+  const tapePass = { names: 0, missingPrint: 0, stalePrint: 0, freshPrint: 0, passes: 0 };
+  let tapePeakFresh = 0;
 
   while (Date.now() < deadline && !book.halted) {
     const t0 = Date.now();
     try {
       const held = book.positions.map((p) => ({ address: p.address, priceSource: p.entrySource }));
       const scan = await collectScan(held);
+      if (scan.tapeStats) {
+        const ts = scan.tapeStats;
+        tapePass.names += ts.names;
+        tapePass.missingPrint += ts.missingPrint;
+        tapePass.stalePrint += ts.stalePrint;
+        tapePass.freshPrint += ts.freshPrint;
+        tapePass.passes += 1;
+        if (ts.freshPrint > tapePeakFresh) tapePeakFresh = ts.freshPrint;
+      }
       for (const q of scan.quotes) {
         if (!q.address) continue;
         tapeSeen.add(q.address);
@@ -186,7 +197,7 @@ async function main() {
       if (passes % 8 === 0 || closedNow.length) {
         const rejects = summarizeRejects(scan, book);
         console.log(
-          `t+${elapsed}s passes=${passes} quotes=${scan.quotes.length} open=${book.positions.length} closes=${book.learn.n} net=${book.learn.netUsd.toFixed(2)} taken=${entriesTaken.size} fresh=${tapeFresh.size} noPrint=${refusedMissing.size} stale=${refusedStale.size} ${rejects} | ${lastProof}`,
+          `t+${elapsed}s passes=${passes} quotes=${scan.quotes.length} open=${book.positions.length} closes=${book.learn.n} net=${book.learn.netUsd.toFixed(2)} taken=${entriesTaken.size} tape=${tapeLine(scan)} intake=${intakeLine()} ${rejects} | ${lastProof}`,
         );
         if (book.positions.length) {
           for (const p of book.positions) {
@@ -234,7 +245,16 @@ async function main() {
       freshPrint: tapeFresh.size,
       refusedMissing: refusedMissing.size,
       refusedStale: refusedStale.size,
+      preFilter: tapePass.passes ? {
+        passes: tapePass.passes,
+        avgNames: tapePass.names / tapePass.passes,
+        avgMissing: tapePass.missingPrint / tapePass.passes,
+        avgStale: tapePass.stalePrint / tapePass.passes,
+        avgFresh: tapePass.freshPrint / tapePass.passes,
+        peakFresh: tapePeakFresh,
+      } : null,
     },
+    intake: pumpIntakeSnapshot(),
     jsonl: jsonlPath,
     liveTradingEnabled: false,
   };
@@ -244,6 +264,17 @@ async function main() {
   console.log("proofLine:", lastProof);
   // The pump.fun websocket keeps the event loop alive; end the process so a timed session can exit.
   process.exit(0);
+}
+
+function tapeLine(scan: { tapeStats?: { names: number; missingPrint: number; stalePrint: number; freshPrint: number } }): string {
+  const ts = scan.tapeStats;
+  if (!ts) return "tape=n/a";
+  return `names=${ts.names} fresh=${ts.freshPrint} stale=${ts.stalePrint} missing=${ts.missingPrint}`;
+}
+
+function intakeLine(): string {
+  const snap = pumpIntakeSnapshot();
+  return `trades=${snap.tradeMessages} creates=${snap.createMessages} raw=${snap.rawMessages} subTrades=${snap.tradeSubscribeOk} watch=${snap.watchedTradeMints}`;
 }
 
 function summarizeRejects(scan: { process: string[] }, _book: Book): string {

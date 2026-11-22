@@ -109,6 +109,13 @@ export type Book = {
   live: boolean;
 };
 
+export type TapePrintStats = {
+  names: number;
+  missingPrint: number;
+  stalePrint: number;
+  freshPrint: number;
+};
+
 export type Scan = {
   at: number;
   regime: Regime;
@@ -120,6 +127,7 @@ export type Scan = {
   quotes: Quote[];
   process: string[];
   note: string;
+  tapeStats?: TapePrintStats;
 };
 
 export const SOL_MIN_USD = 1;

@@ -1,8 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import pg from "pg";
-import { SOL_MIN_USD, scoreOf, tapeFromCloses, DEFAULT_CONFIG, type Quote, type Regime, type Scan, type PriceSource } from "@/lib/keel/engine";
+import { SOL_MIN_USD, scoreOf, tapeFromCloses, DEFAULT_CONFIG, FRESH_PRINT_SEC, type Quote, type Regime, type Scan, type PriceSource } from "@/lib/keel/engine";
 import { cohortFromTape, settleTape, type TapePrint } from "@/lib/keel/trader-intel";
 import { applySameSourceMarks, curveHeldMid, heldSourceOf, parseGeckoTokenPrices } from "@/lib/keel/marks";
+import { canSubscribeTokenTrades, chunkKeys, isTradeSubscribeDenied, newTradeSubscribeKeys, pumpStreamUrl, tapePrintStats } from "@/lib/keel/pump-feed";
 
 const UA = "Keel/1.0";
 function processTapeCohort(quotes: { topTraderFlow?: { signal: string; reason: string } }[]): string {
@@ -11,7 +12,6 @@ function processTapeCohort(quotes: { topTraderFlow?: { signal: string; reason: s
   const lead = reads[0]?.topTraderFlow;
   return `Tape cohort: ${reads.length} names. ${lead?.signal ?? "mixed"} · ${lead?.reason ?? "repeat wallets"}.`;
 }
-const PUMP_STREAM = "wss://pumpportal.fun/api/data";
 const CACHE_MS = 1_200;
 let cache: { at: number; scan: Scan } | null = null;
 type Pair = {
@@ -43,6 +43,11 @@ let lastPumpMsgAt = 0;
 let lastPrintAt = 0;
 let pumpStatus = "Pump.fun launch feed is starting.";
 let lastSolUsd = 0;
+let pumpRawMsgs = 0;
+let pumpCreateMsgs = 0;
+let pumpTradeMsgs = 0;
+let tradeSubscribeDenied = false;
+const pumpApiKey = process.env.PUMPPORTAL_API_KEY?.trim() || "";
 const pumpLaunches = new Map<string, PumpLaunch>();
 const walletBook = new Map<string, { seen: number; good: number; bad: number }>();
 const waitingPrints: TapePrint[] = [];
@@ -190,24 +195,45 @@ function settleWallets(now: number) {
   }
 }
 const heldWatch = new Set<string>();
-function watchMint(socket: WebSocket, mint: string) {
-  if (socket.readyState !== WebSocket.OPEN || watchedMints.has(mint)) return;
-  if (watchedMints.size >= 80) {
-    const drop = [...watchedMints].find((m) => !heldWatch.has(m));
-    if (!drop) return;
-    watchedMints.delete(drop);
-    socket.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [drop] }));
+function tradesAllowed(): boolean {
+  return canSubscribeTokenTrades(pumpApiKey, tradeSubscribeDenied);
+}
+function subscribeTradeMints(socket: WebSocket, mints: string[]) {
+  if (socket.readyState !== WebSocket.OPEN || !tradesAllowed()) return;
+  const fresh = newTradeSubscribeKeys(mints, [...heldWatch], watchedMints);
+  if (!fresh.length) return;
+  for (const chunk of chunkKeys(fresh)) {
+    for (const mint of chunk) watchedMints.add(mint);
+    socket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: chunk }));
   }
-  watchedMints.add(mint);
-  socket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+}
+function watchMint(socket: WebSocket, mint: string) {
+  if (!validMint(mint)) return;
+  subscribeTradeMints(socket, [mint]);
 }
 function watchHeldMints(held: Held[]) {
   heldWatch.clear();
   for (const row of held) {
     if (!validMint(row.address)) continue;
     heldWatch.add(row.address);
-    if (pumpSocket?.readyState === WebSocket.OPEN) watchMint(pumpSocket, row.address);
   }
+  if (pumpSocket?.readyState === WebSocket.OPEN) subscribeTradeMints(pumpSocket, [...pumpLaunches.keys()]);
+}
+function watchTapeMints() {
+  if (pumpSocket?.readyState === WebSocket.OPEN) subscribeTradeMints(pumpSocket, [...pumpLaunches.keys()]);
+}
+export function pumpIntakeSnapshot() {
+  return {
+    rawMessages: pumpRawMsgs,
+    createMessages: pumpCreateMsgs,
+    tradeMessages: pumpTradeMsgs,
+    tradeSubscribeOk: tradesAllowed(),
+    tradeSubscribeDenied,
+    hasApiKey: Boolean(pumpApiKey),
+    watchedTradeMints: watchedMints.size,
+    launches: pumpLaunches.size,
+    status: pumpStatus,
+  };
 }
 function ensurePumpStream(now: number) {
   if (typeof WebSocket === "undefined") {
@@ -227,7 +253,7 @@ function ensurePumpStream(now: number) {
   }
   if (now < pumpRetryAt) return;
   try {
-    const socket = new WebSocket(PUMP_STREAM);
+    const socket = new WebSocket(pumpStreamUrl(pumpApiKey));
     pumpSocket = socket;
     socket.addEventListener("open", () => {
       if (pumpSocket !== socket) return;
@@ -235,9 +261,12 @@ function ensurePumpStream(now: number) {
       lastPumpMsgAt = Date.now();
       socket.send(JSON.stringify({ method: "subscribeNewToken" }));
       socket.send(JSON.stringify({ method: "subscribeMigration" }));
-      for (const mint of pumpLaunches.keys()) watchMint(socket, mint);
-      for (const mint of heldWatch) watchMint(socket, mint);
-      pumpStatus = "Pump.fun launch, trade, and migration stream connected.";
+      if (tradesAllowed()) {
+        subscribeTradeMints(socket, [...pumpLaunches.keys()]);
+        pumpStatus = "Pump.fun launch, trade, and migration stream connected.";
+      } else {
+        pumpStatus = "Pump.fun launch and migration stream connected. Trade prints need a funded PumpPortal API key (PUMPPORTAL_API_KEY); subscribeTokenTrade is denied without one.";
+      }
     });
     socket.addEventListener("message", (message) => {
       lastPumpMsgAt = Date.now();
@@ -245,10 +274,18 @@ function ensurePumpStream(now: number) {
         const raw = typeof message.data === "string" ? message.data : "";
         if (!raw || raw.length > 64_000) return;
         const event = JSON.parse(raw) as PumpEvent;
+        pumpRawMsgs += 1;
+        if (isTradeSubscribeDenied(event)) {
+          tradeSubscribeDenied = true;
+          pumpStatus = "Pump.fun refused subscribeTokenTrade without a funded API key. Create events still arrive; trade prints do not.";
+          return;
+        }
+        const tx = (event.txType ?? "").toLowerCase();
+        if (tx === "buy" || tx === "sell") pumpTradeMsgs += 1;
+        if (tx === "create") pumpCreateMsgs += 1;
         if (!validMint(event.mint)) return;
         const previous = pumpLaunches.get(event.mint);
         const mayhem = Boolean(previous?.mayhem || event.is_mayhem_mode === true || event.pool === "mayhem");
-        const tx = (event.txType ?? "").toLowerCase();
         if (previous && (tx === "buy" || tx === "sell")) {
           noteTrade(previous, event, lastSolUsd);
           previous.event = { ...previous.event, ...event };
@@ -365,6 +402,7 @@ async function pumpFunQuotes(now: number, solUsd: number): Promise<{ quotes: Quo
       if (now - launch.seenAt > 45 * 60_000) pumpLaunches.delete(mint);
     }
     launches = [...pumpLaunches.entries()].sort((a, b) => b[1].seenAt - a[1].seenAt);
+    watchTapeMints();
   }
   if (!launches.length) return { quotes: [], note: feedNote };
   const hot = [...launches].sort((a, b) => {
@@ -612,6 +650,7 @@ async function buildScan(held: Held[]): Promise<Scan> {
   const tape = await solTape();
   const [pump, gecko] = await Promise.all([pumpFunQuotes(now, tape.sol), geckoLiveQuotes(now)]);
   let quotes = mergeQuotes(pump.quotes, gecko.quotes);
+  const stats = tapePrintStats(quotes, FRESH_PRINT_SEC);
   const heldIds = new Set(held.map((row) => row.address));
   const ranked = quotes.map((q) => ({ q, scored: scoreOf(q, DEFAULT_CONFIG, tape.regime) }));
   const visible = ranked.filter((row) => row.scored.score > 0 || heldIds.has(row.q.address)).map((row) => row.q);
@@ -625,6 +664,7 @@ async function buildScan(held: Held[]): Promise<Scan> {
     `Price shift, last minute: ${quotes.filter((q) => Math.abs(q.shift1m ?? q.change5m) >= 3 && q.buys + q.sells > 0).length} names moved. A seller blocks that name only.`,
     lead && lead.scored.score > 0 ? `Top candidate: ${lead.q.symbol} score ${lead.scored.score.toFixed(0)} · ${lead.scored.reasons[0] ?? "review gates"}` : "No name is above zero yet. The pump.fun stream is still being watched.",
     processTapeCohort(quotes),
+    `Tape prints: ${stats.names} names, ${stats.freshPrint} fresh ≤${FRESH_PRINT_SEC}s, ${stats.stalePrint} stale, ${stats.missingPrint} missing.`,
   ];
   const heldVisible = visible.filter((q) => heldIds.has(q.address));
   quotes = visible.filter((q) => !heldIds.has(q.address)).slice(0, 24);
@@ -632,7 +672,7 @@ async function buildScan(held: Held[]): Promise<Scan> {
     if (!quotes.some((row) => row.address === q.address)) quotes.push(q);
   }
   let scan: Scan = { at: now, regime: tape.regime, sol: tape.sol, ret1: tape.ret1, ret5: tape.ret5, sol15: tape.sol15,
-    vol1m: tape.vol1m, quotes, process, note: [tape.note].filter(Boolean).join(" ") };
+    vol1m: tape.vol1m, quotes, process, note: [tape.note].filter(Boolean).join(" "), tapeStats: stats };
   if (held.length) {
     watchHeldMints(held);
     try {
