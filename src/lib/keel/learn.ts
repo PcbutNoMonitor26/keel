@@ -74,8 +74,18 @@ export function laneAdjust(state: LearnState, features: string[]): { penalty: nu
     const bucket = state.buckets[key];
     if (!bucket || bucket.n < 2) continue;
     const avg = bucket.sumR / bucket.n;
-    if (bucket.n >= 8 && avg <= 0) {
+    // Bid is blocked once five closes are still at or under zero, including
+    // fee-sized losses. Other lanes still wait for eight.
+    if ((key === "bid" && bucket.n >= 5 && avg <= 0) || (bucket.n >= 8 && avg <= 0)) {
       block = true;
+      notes.push(`${key} ${avg.toFixed(1)}%`);
+      continue;
+    }
+    // Bid fee-sized red shrinks the clip from the third close. Other lanes
+    // still need avg <= -4, or two ugly closes at or under -8.
+    if (key === "bid" && bucket.n >= 3 && avg <= 0) {
+      penalty += 6;
+      sizeMul *= 0.5;
       notes.push(`${key} ${avg.toFixed(1)}%`);
       continue;
     }

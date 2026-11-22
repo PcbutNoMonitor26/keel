@@ -50,3 +50,19 @@ test("feature tags keep mayhem losses off the live lane", () => {
   assert.ok(tags.includes("thin"));
   assert.ok(tags.includes("chase"));
 });
+
+test("a bid lane that is fee-red shrinks at three closes and is blocked at five", () => {
+  let learn = emptyLearn();
+  for (let i = 0; i < 3; i++) learn = recordLane(learn, ["bid"], -1);
+  const shrunk = laneAdjust(learn, ["bid"]);
+  assert.ok(shrunk.sizeMul <= 0.5);
+  assert.ok(shrunk.penalty >= 6);
+  assert.equal(shrunk.block, false);
+  assert.equal(laneAdjust(learn, ["live"]).sizeMul, 1);
+  assert.equal(laneAdjust(learn, ["live"]).block, false);
+  for (let i = 0; i < 2; i++) learn = recordLane(learn, ["bid"], -1);
+  const blocked = laneAdjust(learn, ["bid"]);
+  assert.equal(blocked.block, true);
+  assert.equal(laneAdjust(learn, ["live"]).block, false);
+});
+
