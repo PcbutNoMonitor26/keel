@@ -15,7 +15,7 @@ function arg(flag: string, fallback: string): string {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1]! : fallback;
 }
 
-const minutes = Math.max(1, Number(arg("--minutes", "25")) || 25);
+const minutes = Math.max(0.2, Number(arg("--minutes", "25")) || 25);
 const outDir = arg("--out", "/workspace/keel-sessions");
 const pollMs = Math.max(800, Number(arg("--poll-ms", "1500")) || 1500);
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -187,6 +187,8 @@ async function main() {
   appendFileSync(jsonlPath, JSON.stringify({ summary: true, proofLine: lastProof, netUsd: book.learn.netUsd, closes: book.learn.n }) + "\n");
   console.log("SUMMARY", JSON.stringify(summary, null, 2));
   console.log("proofLine:", lastProof);
+  // The pump.fun websocket keeps the event loop alive; end the process so a timed session can exit.
+  process.exit(0);
 }
 
 function summarizeRejects(scan: { process: string[] }, _book: Book): string {
