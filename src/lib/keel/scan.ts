@@ -1,7 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import pg from "pg";
-import { SOL_MIN_USD, scoreOf, tapeFromCloses, DEFAULT_CONFIG, keepScanPriceOverDex, type Quote, type Regime, type Scan } from "@/lib/keel/engine";
+import { SOL_MIN_USD, scoreOf, tapeFromCloses, DEFAULT_CONFIG, type Quote, type Regime, type Scan, type PriceSource } from "@/lib/keel/engine";
 import { cohortFromTape, settleTape, type TapePrint } from "@/lib/keel/trader-intel";
+import { applySameSourceMarks, curveHeldMid, heldSourceOf, parseGeckoTokenPrices } from "@/lib/keel/marks";
 
 const UA = "Keel/1.0";
 function processTapeCohort(quotes: { topTraderFlow?: { signal: string; reason: string } }[]): string {
@@ -33,7 +34,7 @@ type PumpLaunch = {
   prints?: { t: number; px: number }[];
   flow?: TapePrint[];
 };
-type Held = { address: string };
+export type Held = { address: string; priceSource?: PriceSource };
 
 let pumpSocket: WebSocket | null = null;
 let pumpRetryAt = 0;
@@ -439,7 +440,9 @@ function readHeld(input: unknown): Held[] {
   return raw.flatMap(row => {
     if (!row || typeof row !== "object") return [];
     const address = (row as { address?: unknown }).address;
-    return validMint(address) ? [{ address }] : [];
+    const src = (row as { priceSource?: unknown }).priceSource;
+    const priceSource = src === "curve" || src === "gecko" || src === "dex" ? src : undefined;
+    return validMint(address) ? [{ address, priceSource }] : [];
   }).slice(0, 8);
 }
 async function heldQuotes(held: Held[]): Promise<Quote[]> {
@@ -456,21 +459,56 @@ async function heldQuotes(held: Held[]): Promise<Quote[]> {
 }
 
 function applyHeldMarks(quotes: Quote[], marks: Quote[]): Quote[] {
-  const byAddress = new Map(quotes.map((quote) => [quote.address, { ...quote }]));
-  for (const mark of marks) {
-    if (!(mark.price > 0)) continue;
-    const prev = byAddress.get(mark.address);
-    if (!prev) {
-      byAddress.set(mark.address, mark);
-      continue;
-    }
-    if (keepScanPriceOverDex(prev, mark)) {
-      byAddress.set(mark.address, { ...prev, liq: mark.liq > 0 ? mark.liq : prev.liq });
-      continue;
-    }
-    byAddress.set(mark.address, { ...prev, price: mark.price, liq: mark.liq > 0 ? mark.liq : prev.liq, priceSource: mark.priceSource ?? "dex" });
+  return applySameSourceMarks(quotes, marks);
+}
+
+function curveHeldMarks(held: Held[], solUsd: number, now: number): Quote[] {
+  const out: Quote[] = [];
+  for (const row of held) {
+    const launch = pumpLaunches.get(row.address);
+    if (!launch) continue;
+    const mid = curveHeldMid(launch, solUsd, now);
+    if (!(mid.price > 0)) continue;
+    out.push({
+      venue: "sol", address: row.address, symbol: row.address.slice(0, 6), title: "", price: mid.price,
+      liq: realCurveUsd(launch.event, solUsd), vol1h: 0, change1h: 0, change5m: 0, buys: launch.buys, sells: launch.sells,
+      dex: "pump.fun", side: "long", assetId: "", mins: SOL_MIN_USD, minutes: 0, edge: 0, fair: 0, endsAt: 0,
+      pumpFun: true, priceSource: "curve", lastPrintAgeSec: mid.lastPrintAgeSec,
+    });
   }
-  return [...byAddress.values()];
+  return out;
+}
+
+async function geckoHeldQuotes(held: Held[]): Promise<Quote[]> {
+  const mints = held.map((h) => h.address).filter((a) => validMint(a));
+  if (!mints.length) return [];
+  // Bypass the 12s new-pool cache; this path is only for names already in the book.
+  const body = await getJson<unknown>(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints.join(",")}`, 1500);
+  const prices = parseGeckoTokenPrices(body);
+  return mints.flatMap((address) => {
+    const price = prices.get(address);
+    if (!(price && price > 0)) return [];
+    return [{
+      venue: "sol" as const, address, symbol: address.slice(0, 6), title: "", price,
+      liq: 0, vol1h: 0, change1h: 0, change5m: 0, buys: 0, sells: 0,
+      dex: "gecko", side: "long" as const, assetId: "", mins: SOL_MIN_USD, minutes: 0, edge: 0, fair: 0, endsAt: 0,
+      priceSource: "gecko" as const,
+    }];
+  });
+}
+
+function heldBuckets(held: Held[], quotes: Quote[]): { curve: Held[]; gecko: Held[]; dex: Held[] } {
+  const byAddr = new Map(quotes.map((q) => [q.address, q]));
+  const curve: Held[] = [];
+  const gecko: Held[] = [];
+  const dex: Held[] = [];
+  for (const row of held) {
+    const src = heldSourceOf(row, byAddr.get(row.address), pumpLaunches.has(row.address));
+    if (src === "curve") curve.push(row);
+    else if (src === "gecko") gecko.push(row);
+    else dex.push(row);
+  }
+  return { curve, gecko, dex };
 }
 let refreshing = false;
 
@@ -583,8 +621,23 @@ async function buildScan(held: Held[]): Promise<Scan> {
   let scan: Scan = { at: now, regime: tape.regime, sol: tape.sol, ret1: tape.ret1, ret5: tape.ret5, sol15: tape.sol15,
     vol1m: tape.vol1m, quotes, process, note: [tape.note].filter(Boolean).join(" ") };
   if (held.length) {
-    try { const marks = await heldQuotes(held); scan={...scan,quotes:applyHeldMarks(quotes, marks)}; }
-    catch { scan={...scan,note:[scan.note,"One or more held-token marks could not be refreshed."].filter(Boolean).join(" ")}; }
+    try {
+      const buckets = heldBuckets(held, quotes);
+      const marks: Quote[] = [...curveHeldMarks(buckets.curve, tape.sol, now)];
+      let missed = false;
+      if (buckets.gecko.length) {
+        try { marks.push(...await geckoHeldQuotes(buckets.gecko)); }
+        catch { missed = true; }
+      }
+      if (buckets.dex.length) {
+        try { marks.push(...await heldQuotes(buckets.dex)); }
+        catch { missed = true; }
+      }
+      scan = { ...scan, quotes: applyHeldMarks(quotes, marks) };
+      if (missed) scan = { ...scan, note: [scan.note, "One or more held-token marks could not be refreshed."].filter(Boolean).join(" ") };
+    } catch {
+      scan = { ...scan, note: [scan.note, "One or more held-token marks could not be refreshed."].filter(Boolean).join(" ") };
+    }
   }
   if (held.length === 0) cache = { at: now, scan };
   return scan;

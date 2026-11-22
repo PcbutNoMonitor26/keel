@@ -56,7 +56,7 @@ export function Desk({ initial }: { initial: Scan }) {
     const pull = () => {
       if (busy || stop) return;
       busy = true;
-      const held = useDesk.getState().positions.map((p) => ({ address: p.address }));
+      const held = useDesk.getState().positions.map((p) => ({ address: p.address, priceSource: p.entrySource }));
       const scan = refresh({ data: { held } });
       const timeout = new Promise<never>((_, reject) => {
         window.setTimeout(() => reject(new Error("slow")), 8_000);
@@ -348,7 +348,7 @@ export function Desk({ initial }: { initial: Scan }) {
       s.start();
       setParkedAsk(false);
       setHostNote("Host armed. Taking the next pass on the live tape.");
-      const held = s.positions.map((p) => ({ address: p.address }));
+      const held = s.positions.map((p) => ({ address: p.address, priceSource: p.entrySource }));
       refresh({ data: { held } })
         .then((scan) => {
           useDesk.getState().ingest(scan);

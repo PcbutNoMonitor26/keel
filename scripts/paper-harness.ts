@@ -17,7 +17,7 @@ function arg(flag: string, fallback: string): string {
 
 const minutes = Math.max(0.2, Number(arg("--minutes", "25")) || 25);
 const outDir = arg("--out", "/workspace/keel-sessions");
-const pollMs = Math.max(800, Number(arg("--poll-ms", "1500")) || 1500);
+const pollMs = Math.max(800, Number(arg("--poll-ms", "2000")) || 2000);
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const tag = arg("--tag", "session");
 const jsonlPath = join(outDir, `${stamp}-${tag}.jsonl`);
@@ -51,6 +51,9 @@ type CloseRow = {
   markSource: "scan" | "stale-position";
   lastPrintAgeSec: number | null;
   midChgPct: number | null;
+  entrySource: string | null;
+  exitSource: string | null;
+  midTicks: number;
 };
 
 const closes: CloseRow[] = [];
@@ -88,15 +91,25 @@ async function main() {
   let passes = 0;
   let scanErrors = 0;
   let lastProof = proofLine(book.learn);
+  const midWatch = new Map<string, { last: number; ticks: number }>();
 
   while (Date.now() < deadline && !book.halted) {
     const t0 = Date.now();
     try {
-      const held = book.positions.map((p) => ({ address: p.address }));
+      const held = book.positions.map((p) => ({ address: p.address, priceSource: p.entrySource }));
       const scan = await collectScan(held);
       const before = book;
       const open = new Map(before.positions.map((p) => [p.address, p]));
       book = applyScan(before, scan);
+      for (const p of book.positions) {
+        const mid = p.mark || p.entryMid || 0;
+        const prev = midWatch.get(p.address);
+        if (!prev) midWatch.set(p.address, { last: mid, ticks: 0 });
+        else if (mid > 0 && prev.last > 0 && Math.abs(mid / prev.last - 1) > 1e-9) {
+          prev.ticks += 1;
+          prev.last = mid;
+        }
+      }
       passes += 1;
       const closedNow: Position[] = [];
       for (const [addr, pos] of open) {
@@ -135,11 +148,15 @@ async function main() {
           markSource: fromScan ? "scan" : "stale-position",
           lastPrintAgeSec: tok?.lastPrintAgeSec ?? null,
           midChgPct,
+          entrySource: pos.entrySource ?? null,
+          exitSource: tok?.priceSource ?? pos.entrySource ?? null,
+          midTicks: midWatch.get(pos.address)?.ticks ?? 0,
         };
         closes.push(row);
+        midWatch.delete(pos.address);
         appendFileSync(jsonlPath, JSON.stringify(row) + "\n");
         console.log(
-          `CLOSE ${row.symbol} ${row.why} lanes=${row.lanes.join(",")} net=${row.netUsd.toFixed(4)} hold=${Math.round(row.holdMs / 1000)}s midChg=${row.midChgPct == null ? "n/a" : row.midChgPct.toFixed(2) + "%"} src=${row.markSource} printAge=${row.lastPrintAgeSec == null ? "n/a" : row.lastPrintAgeSec.toFixed(1) + "s"} proof=${row.proofLine}`,
+          `CLOSE ${row.symbol} ${row.why} lanes=${row.lanes.join(",")} net=${row.netUsd.toFixed(4)} hold=${Math.round(row.holdMs / 1000)}s midChg=${row.midChgPct == null ? "n/a" : row.midChgPct.toFixed(2) + "%"} entrySrc=${row.entrySource ?? "n/a"} exitSrc=${row.exitSource ?? "n/a"} ticks=${row.midTicks} printAge=${row.lastPrintAgeSec == null ? "n/a" : row.lastPrintAgeSec.toFixed(1) + "s"} proof=${row.proofLine}`,
         );
       }
       lastProof = proofLine(book.learn);
