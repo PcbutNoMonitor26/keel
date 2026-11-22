@@ -247,6 +247,19 @@ test("a red clip is sold once it has had four seconds and the host stays on", ()
   assert.equal(next.halted, false);
 });
 
+test("a chased pump or live tape of 18% or more is refused", () => {
+  const pump = {
+    ...token, dex: "pump.fun", pumpFun: true, ageMin: 4, minutes: 4,
+    liq: 12_000, buys: 16, sells: 7, change5m: 8, uniqueTraders: 8, preMigration: true,
+  };
+  assert.ok(scoreOf(pump, DEFAULT_CONFIG, "up").score > 0);
+  assert.equal(scoreOf({ ...pump, change5m: 18 }, DEFAULT_CONFIG, "up").score, 0);
+  assert.equal(scoreOf({ ...pump, change5m: 8, shift1m: 25 }, DEFAULT_CONFIG, "up").score, 0);
+  assert.ok(scoreOf({ ...pump, change5m: 12 }, DEFAULT_CONFIG, "up").score > 0);
+  assert.equal(scoreOf({ ...token, change5m: 25 }, DEFAULT_CONFIG, "up").score, 0);
+  assert.ok(scoreOf({ ...token, change5m: 8 }, DEFAULT_CONFIG, "up").score > 0);
+});
+
 test("a flat tape and a lane that already lost its fees are not taken", () => {
   const pump = {
     ...token, dex: "pump.fun", pumpFun: true, ageMin: 2, minutes: 2,

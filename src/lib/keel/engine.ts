@@ -316,7 +316,8 @@ export function scoreOf(
       && q.liq <= 40_000;
     if (q.liq < 2200 && !trench) return { score: 0, reasons: [`curve ${fmtUsd(q.liq)}`] };
     if (q.liq > 150000) return { score: 0, reasons: ["launch liquidity above discovery range"] };
-    if (move >= 70) return { score: 0, reasons: [`blow-off +${move.toFixed(0)}%`] };
+    const chaseMove = Math.max(move, q.change5m);
+    if (chaseMove >= 18) return { score: 0, reasons: [`chase +${chaseMove.toFixed(0)}%`] };
     if (move <= -15) return { score: 0, reasons: [`dump ${move.toFixed(0)}%`] };
     if (move < 3) return { score: 0, reasons: ["flat tape, the fee would take it"] };
     if (q.buys < 8 || q.sells < 2 || q.buys <= q.sells) {
@@ -347,7 +348,8 @@ export function scoreOf(
   if (q.vol1h < 5000 && q.buys + q.sells < 40) return { score: 0, reasons: ["thin tape"] };
   if (move <= -8) return { score: 0, reasons: [`5m ${move.toFixed(0)}%`] };
   if (move < 3) return { score: 0, reasons: ["flat tape, the fee would take it"] };
-  if (move >= 35) return { score: 0, reasons: [`blow-off +${move.toFixed(0)}%`] };
+  const chaseMove = Math.max(move, q.change5m);
+  if (chaseMove >= 18) return { score: 0, reasons: [`chase +${chaseMove.toFixed(0)}%`] };
   if (q.sells > q.buys * 1.35 && q.sells > 20) return { score: 0, reasons: ["distribution"] };
 
   let score = 46;
