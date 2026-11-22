@@ -408,10 +408,11 @@ export function scoreOf(
   return finish(score, reasons, q, learn, cfg.buyUsd);
 }
 
-function quietTape(q: Quote): string | null {
-  if (typeof q.lastPrintAgeSec !== "number" || !Number.isFinite(q.lastPrintAgeSec)) return null;
-  if (q.lastPrintAgeSec > FRESH_PRINT_SEC) return `no print in ${Math.max(1, Math.round(q.lastPrintAgeSec))}s`;
-  return null;
+export function quietTape(q: { lastPrintAgeSec?: number }): string | null {
+  const age = q.lastPrintAgeSec;
+  if (typeof age === "number" && Number.isFinite(age) && age <= FRESH_PRINT_SEC) return null;
+  const shown = typeof age === "number" && Number.isFinite(age) ? Math.max(1, Math.round(age)) : FRESH_PRINT_SEC;
+  return `no print in ${shown}s`;
 }
 
 function finish(score: number, reasons: string[], q: Quote, learn: LearnState | undefined, sizeUsd: number): { score: number; reasons: string[] } {

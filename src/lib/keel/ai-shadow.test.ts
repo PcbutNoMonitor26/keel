@@ -24,6 +24,7 @@ const quote: Quote = {
   edge: 0,
   fair: 0,
   endsAt: 0,
+  lastPrintAgeSec: 1,
 };
 
 function scan(at: number, quotes: Quote[], regime: Scan["regime"] = "up"): Scan {

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, FRESH_PRINT_SEC, MAX_IMPACT, PAPER_FEE, PUMP_CLIP_FRAC, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses, keepScanPriceOverDex } from "./engine.ts";
+import { DEFAULT_CONFIG, FRESH_PRINT_SEC, MAX_IMPACT, PAPER_FEE, PUMP_CLIP_FRAC, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses, keepScanPriceOverDex, quietTape } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
   venue: "sol" as const, address: "So11111111111111111111111111111111111111112", symbol: "SOL", title: "Solana",
   price: 150, liq: 50000, vol1h: 40000, change1h: 2, change5m: 3, buys: 40, sells: 12,
   dex: "raydium", side: "long" as const, assetId: "", mins: 1, minutes: 0, edge: 0, fair: 0, endsAt: 0,
+  lastPrintAgeSec: 1,
 };
 
 test("empty book starts with configured cash and no live positions", () => {
@@ -304,7 +305,12 @@ test("a name with no recent print is not bought", () => {
   };
   assert.ok(scoreOf(pump, DEFAULT_CONFIG, "up").score > 0);
   assert.equal(scoreOf({ ...pump, lastPrintAgeSec: FRESH_PRINT_SEC + 1 }, DEFAULT_CONFIG, "up").score, 0);
-  assert.ok(scoreOf({ ...pump, lastPrintAgeSec: undefined }, DEFAULT_CONFIG, "up").score > 0, "fixtures without a print age still use the other gates");
+  const missing = scoreOf({ ...pump, lastPrintAgeSec: undefined }, DEFAULT_CONFIG, "up");
+  assert.equal(missing.score, 0, "a missing print age is a quiet tape");
+  assert.equal(missing.reasons[0], quietTape({}));
+  assert.equal(quietTape({}), "no print in 15s");
+  assert.equal(quietTape({ lastPrintAgeSec: 5 }), null);
+  assert.equal(quietTape({ lastPrintAgeSec: FRESH_PRINT_SEC + 1 }), "no print in 16s");
 });
 
 test("a chased pump or live tape of 18% or more is refused", () => {
@@ -416,7 +422,7 @@ test("a first unprinted gecko mid jump re-anchors instead of scratching or takin
   assert.equal(opened.positions.length, 1);
   const dump = applyScan(opened, {
     at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
-    quotes: [{ ...live, price: live.price * 0.93 }], process: [], note: "",
+    quotes: [{ ...live, price: live.price * 0.93, lastPrintAgeSec: undefined }], process: [], note: "",
   });
   assert.equal(dump.positions.length, 1, "an unprinted gecko drop is not a scratch");
   assert.equal(dump.positions[0]?.sourceAnchored, true);
@@ -424,7 +430,7 @@ test("a first unprinted gecko mid jump re-anchors instead of scratching or takin
   assert.equal(dump.positions[0]?.entrySource, "gecko");
   const pump = applyScan(opened, {
     at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
-    quotes: [{ ...live, price: live.price * 1.35 }], process: [], note: "",
+    quotes: [{ ...live, price: live.price * 1.35, lastPrintAgeSec: undefined }], process: [], note: "",
   });
   assert.equal(pump.positions.length, 1, "an unprinted gecko jump is not vitality");
   assert.equal(pump.positions[0]?.sourceAnchored, true);
@@ -439,7 +445,7 @@ test("a confirmed print drop still scratches after a gecko re-anchor", () => {
   });
   const anchored = applyScan(opened, {
     at: 2_500, regime: "up", sol: 150, ret1: 0.1, ret5: 0.4, sol15: 1, vol1m: 0.2,
-    quotes: [{ ...live, price: live.price * 0.99 }], process: [], note: "",
+    quotes: [{ ...live, price: live.price * 0.99, lastPrintAgeSec: undefined }], process: [], note: "",
   });
   assert.equal(anchored.positions.length, 1);
   const printed = applyScan(anchored, {

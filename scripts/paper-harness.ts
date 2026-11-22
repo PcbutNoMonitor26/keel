@@ -7,7 +7,7 @@
 import { mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { collectScan } from "../src/lib/keel/scan.ts";
-import { applyScan, emptyBook, equityOf, paperExit, PAPER_FEE, type Book, type Position } from "../src/lib/keel/engine.ts";
+import { applyScan, emptyBook, equityOf, paperExit, PAPER_FEE, quietTape, type Book, type Position } from "../src/lib/keel/engine.ts";
 import { countMidTick, hasTapePrint } from "../src/lib/keel/marks.ts";
 import { proofLine, profitFactor, type LearnState } from "../src/lib/keel/learn.ts";
 
@@ -94,15 +94,31 @@ async function main() {
   let scanErrors = 0;
   let lastProof = proofLine(book.learn);
   const midWatch = new Map<string, { last: number; ticks: number }>();
+  const tapeSeen = new Set<string>();
+  const tapeFresh = new Set<string>();
+  const refusedMissing = new Set<string>();
+  const refusedStale = new Set<string>();
+  const entriesTaken = new Set<string>();
 
   while (Date.now() < deadline && !book.halted) {
     const t0 = Date.now();
     try {
       const held = book.positions.map((p) => ({ address: p.address, priceSource: p.entrySource }));
       const scan = await collectScan(held);
+      for (const q of scan.quotes) {
+        if (!q.address) continue;
+        tapeSeen.add(q.address);
+        const why = quietTape(q);
+        if (!why) tapeFresh.add(q.address);
+        else if (typeof q.lastPrintAgeSec === "number" && Number.isFinite(q.lastPrintAgeSec)) refusedStale.add(q.address);
+        else refusedMissing.add(q.address);
+      }
       const before = book;
       const open = new Map(before.positions.map((p) => [p.address, p]));
       book = applyScan(before, scan);
+      for (const p of book.positions) {
+        if (!open.has(p.address)) entriesTaken.add(p.address);
+      }
       const still = new Map(book.positions.map((p) => [p.address, p]));
       for (const [addr, pos] of open) {
         const current = still.get(addr);
@@ -170,7 +186,7 @@ async function main() {
       if (passes % 8 === 0 || closedNow.length) {
         const rejects = summarizeRejects(scan, book);
         console.log(
-          `t+${elapsed}s passes=${passes} quotes=${scan.quotes.length} open=${book.positions.length} closes=${book.learn.n} net=${book.learn.netUsd.toFixed(2)} ${rejects} | ${lastProof}`,
+          `t+${elapsed}s passes=${passes} quotes=${scan.quotes.length} open=${book.positions.length} closes=${book.learn.n} net=${book.learn.netUsd.toFixed(2)} taken=${entriesTaken.size} fresh=${tapeFresh.size} noPrint=${refusedMissing.size} stale=${refusedStale.size} ${rejects} | ${lastProof}`,
         );
         if (book.positions.length) {
           for (const p of book.positions) {
@@ -212,6 +228,13 @@ async function main() {
     open: book.positions.map((p) => ({ symbol: p.symbol, sizeUsd: p.sizeUsd, features: p.features, score: p.score })),
     buckets: book.learn.buckets,
     lanes: laneBreakdown(closes, book.learn),
+    entriesTaken: entriesTaken.size,
+    tape: {
+      namesSeen: tapeSeen.size,
+      freshPrint: tapeFresh.size,
+      refusedMissing: refusedMissing.size,
+      refusedStale: refusedStale.size,
+    },
     jsonl: jsonlPath,
     liveTradingEnabled: false,
   };
