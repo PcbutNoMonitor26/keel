@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, FRESH_PRINT_SEC, PAPER_FEE, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
+import { DEFAULT_CONFIG, FRESH_PRINT_SEC, MAX_IMPACT, PAPER_FEE, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
@@ -281,6 +281,19 @@ test("a mid that is up but still fee-red is held past four seconds", () => {
   assert.equal(next.positions.length, 1);
   const exit = paperExit(1, 1.003, 5, 50_000);
   assert.ok(exit.pnl - 5 * PAPER_FEE < 0, "precondition: 0.3% mid lift does not clear the 0.5% fee");
+});
+
+test("a curve whose impact would eat the 4% target is refused", () => {
+  const pump = {
+    ...token, dex: "pump.fun", pumpFun: true, ageMin: 4, minutes: 4,
+    liq: 12_000, buys: 16, sells: 7, change5m: 8, uniqueTraders: 8, preMigration: true,
+  };
+  assert.ok(scoreOf(pump, DEFAULT_CONFIG, "up").score > 0);
+  // $5 / $1,800 * 2 = 0.56% impact, above the 0.4% cap, still above the $1,400 trench floor.
+  const tight = scoreOf({ ...pump, liq: 1_800 }, DEFAULT_CONFIG, "up");
+  assert.equal(tight.score, 0);
+  assert.match(tight.reasons.join(" "), /impact/);
+  assert.ok(MAX_IMPACT === 0.004);
 });
 
 test("a name with no recent print is not bought", () => {

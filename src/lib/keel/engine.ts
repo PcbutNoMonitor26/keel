@@ -122,6 +122,8 @@ export const SESSION_BRAKE = 0.04;
 
 export const PAPER_FEE = 0.005;
 export const FRESH_PRINT_SEC = 15;
+// 0.4% impact each way plus 1% round-trip fees still leaves room inside a 4% target.
+export const MAX_IMPACT = 0.004;
 
 export const DEFAULT_CONFIG: Config = {
   pollSec: 4,
@@ -390,6 +392,10 @@ function finish(score: number, reasons: string[], q: Quote, learn: LearnState | 
   }
   if (score > 0 && !scalpPays(sizeUsd, q.liq)) {
     return { score: 0, reasons: [`a 4% scalp does not clear costs on ${fmtUsd(q.liq)}`] };
+  }
+  const impact = impactOf(sizeUsd, q.liq);
+  if (score > 0 && impact > MAX_IMPACT) {
+    return { score: 0, reasons: [`impact ${(impact * 100).toFixed(1)}% leaves no room for a 4% scalp after fees`] };
   }
   let next = Math.max(0, Math.min(100, score));
   if (learn && next > 0) {
