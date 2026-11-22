@@ -121,6 +121,7 @@ export const RESERVE = 0.35;
 export const SESSION_BRAKE = 0.04;
 
 export const PAPER_FEE = 0.005;
+export const FRESH_PRINT_SEC = 15;
 
 export const DEFAULT_CONFIG: Config = {
   pollSec: 4,
@@ -375,7 +376,15 @@ export function scoreOf(
   return finish(score, reasons, q, learn, cfg.buyUsd);
 }
 
+function quietTape(q: Quote): string | null {
+  if (typeof q.lastPrintAgeSec !== "number" || !Number.isFinite(q.lastPrintAgeSec)) return null;
+  if (q.lastPrintAgeSec > FRESH_PRINT_SEC) return `no print in ${Math.max(1, Math.round(q.lastPrintAgeSec))}s`;
+  return null;
+}
+
 function finish(score: number, reasons: string[], q: Quote, learn: LearnState | undefined, sizeUsd: number): { score: number; reasons: string[] } {
+  const quiet = quietTape(q);
+  if (quiet) return { score: 0, reasons: [quiet] };
   if (q.topTraderFlow?.signal === "negative") {
     return { score: 0, reasons: [`top traders selling · ${q.topTraderFlow.sellAccounts} accounts`] };
   }

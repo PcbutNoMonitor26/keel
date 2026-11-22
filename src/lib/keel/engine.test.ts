@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_CONFIG, PAPER_FEE, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
+import { DEFAULT_CONFIG, FRESH_PRINT_SEC, PAPER_FEE, emptyBook, planClip, scoreOf, equityOf, applyScan, marketBump, paperExit, manualClose, redeployClip, tapeFromCloses } from "./engine.ts";
 import { emptyLearn, recordOutcome } from "./learn.ts";
 
 const token = {
@@ -281,6 +281,17 @@ test("a mid that is up but still fee-red is held past four seconds", () => {
   assert.equal(next.positions.length, 1);
   const exit = paperExit(1, 1.003, 5, 50_000);
   assert.ok(exit.pnl - 5 * PAPER_FEE < 0, "precondition: 0.3% mid lift does not clear the 0.5% fee");
+});
+
+test("a name with no recent print is not bought", () => {
+  const pump = {
+    ...token, dex: "pump.fun", pumpFun: true, ageMin: 4, minutes: 4,
+    liq: 12_000, buys: 16, sells: 7, change5m: 8, uniqueTraders: 8, preMigration: true,
+    lastPrintAgeSec: 5,
+  };
+  assert.ok(scoreOf(pump, DEFAULT_CONFIG, "up").score > 0);
+  assert.equal(scoreOf({ ...pump, lastPrintAgeSec: FRESH_PRINT_SEC + 1 }, DEFAULT_CONFIG, "up").score, 0);
+  assert.ok(scoreOf({ ...pump, lastPrintAgeSec: undefined }, DEFAULT_CONFIG, "up").score > 0, "fixtures without a print age still use the other gates");
 });
 
 test("a chased pump or live tape of 18% or more is refused", () => {
