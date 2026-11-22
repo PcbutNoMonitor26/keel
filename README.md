@@ -10,7 +10,7 @@ The page polls about every 1.5 seconds, and a new pump.fun print throws out a st
 2. Prices names that printed in the last 90 seconds. The rest stay on the curve price in the background.
 3. Scores the last minute, not the life of the coin. A dump or a cooled tape scores zero. One seller blocks that name only.
 
-A name has to clear the score floor, fit the cash reserve, and leave enough curve that a 4% scalp still clears fees and impact. A curve that would charge about 3% or more just to get in is refused, including from Invest.
+A name has to clear the score floor (54), fit the cash reserve, and leave enough curve that a 4% scalp still clears a 0.5% per-side fee and impact. A curve that would charge about 3% or more just to get in is refused, including from Invest.
 
 ## Exits
 
@@ -22,10 +22,22 @@ Closed paper scalps save the readings from the entry. After 80 closes, a small l
 
 ## Run it
 
+In the browser (paper book lives in localStorage; Start arms the host):
+
 ```sh
 npm install
 npm run dev
 ```
+
+Then open http://localhost:8080, wait for the book to hydrate, and tap Start. Live sends stay off.
+
+Headless paper against the live pump.fun / GeckoTerminal / SOL tape (same `engine.ts` / `scan.ts` / `learn.ts`):
+
+```sh
+npx vite-node scripts/paper-harness.ts -- --minutes 25 --out /workspace/keel-sessions
+```
+
+Closes are appended as JSONL. `proofLine` is written next to them. This is not a backtest.
 
 ## Where the logic lives
 
@@ -35,5 +47,6 @@ npm run dev
 | `src/lib/keel/scan.ts` | Pump.fun stream, SOL tape, GeckoTerminal, DexScreener |
 | `src/lib/keel/model.ts` | Walk-forward weights. Off until a later window is green |
 | `src/lib/keel/ai-shadow.ts` | Separate paper book. Same gates, no live send |
-| `src/lib/keel/store.ts` | The book in this browser |
-| `src/components/desk/Desk.tsx` | Tape, book, process, proof |
+| `src/lib/keel/store.ts` | The book in this browser. `arm()` stays off until the proof gate |
+| `src/components/desk/Desk.tsx` | Tape, book, process, proof. `LIVE_TRADING_ENABLED` is false |
+| `src/lib/keel/learn.ts` | Lanes and `proofLine` (the only proof sentence) |

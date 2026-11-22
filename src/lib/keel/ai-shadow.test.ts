@@ -181,10 +181,10 @@ test("learned weak lanes reduce paper clip size without increasing risk", () => 
   assert.equal(plain.positions[0]!.sizeUsd, 5);
 });
 
-test("AI paper equity charges conservative 1.25% fees on both sides", () => {
+test("AI paper equity charges conservative 0.5% fees on both sides", () => {
   const opened = advanceAiShadow(emptyAiShadow(), scan(1_000, [quote]), DEFAULT_CONFIG);
   const position = opened.positions[0]!;
-  assert.equal(position.entryFee, 5 * 0.0125);
+  assert.equal(position.entryFee, 5 * 0.005);
   const closed = advanceAiShadow(opened, scan(2_000, [{ ...quote, price: 126 }]), DEFAULT_CONFIG);
   const trade = closed.trades[0]!;
   const grossExit = position.sizeUsd * (trade.exit / trade.entry);

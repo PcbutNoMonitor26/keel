@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyLearn, featuresOf, laneAdjust, learnSummary, proofLine, recordLane, recordOutcome } from "./learn.ts";
+import { emptyLearn, featuresOf, laneAdjust, learnSummary, paperProofPassed, proofLine, recordLane, recordOutcome } from "./learn.ts";
 
 test("a losing mayhem lane raises the next score and shrinks the next clip", () => {
   let learn = emptyLearn();
@@ -26,9 +26,21 @@ test("two ugly closes shrink the lane before five samples", () => {
 test("proof stays unclaimed until eight live closes", () => {
   let learn = emptyLearn();
   assert.match(proofLine(learn), /Too early/);
+  assert.match(proofLine(learn), /^Paper proof: \$0\.00\./);
+  assert.equal(paperProofPassed(learn), false);
   for (let i = 0; i < 8; i++) learn = recordOutcome(learn, ["live"], 4, 1);
   assert.match(proofLine(learn), /ahead of the fee hurdle/);
+  assert.match(proofLine(learn), /^Paper proof: \+\$8\.00 net\./);
+  assert.equal(paperProofPassed(learn), true);
   assert.equal(learn.wins, 8);
+});
+
+test("arm proof stays off when closes are behind the fee hurdle", () => {
+  let learn = emptyLearn();
+  for (let i = 0; i < 8; i++) learn = recordOutcome(learn, ["early"], -2.2, -0.2);
+  assert.equal(paperProofPassed(learn), false);
+  assert.match(proofLine(learn), /^Paper proof: -\$1\.60 net\./);
+  assert.match(proofLine(learn), /behind the fee hurdle/);
 });
 
 test("feature tags keep mayhem losses off the live lane", () => {
